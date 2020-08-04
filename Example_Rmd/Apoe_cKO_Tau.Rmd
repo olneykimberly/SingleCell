@@ -1,0 +1,1481 @@
+---
+title: "Apoe cKO and Tau Injections Single Cell"
+author: "Tanner Jensen"
+date: "10/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(Seurat)
+require(magrittr)
+require(scales)
+require(tibble)
+require(readr)
+require(tidyr)
+require(dplyr)
+require(tibble)
+require(ggplot2)
+require(pheatmap)
+require(magrittr)
+require(matrixStats)
+require(WriteXLS)
+require(cowplot)
+require(monocle)
+```
+
+## Load CellRanger Matrix into Seurat Object
+```{r}
+apoe.cko.tau.counts <- Read10X("/data5/neurology/fryer/m163373/data/ApoE_Tau/cellranger/Apoe_Tau_Aggr/outs/filtered_feature_bc_matrix/")
+apoe.cko.tau <- CreateSeuratObject(apoe.cko.tau.counts, project = "APOE_cKO_TAU", min.cells = 10, min.features = 500)
+```
+
+```{r}
+dim(apoe.cko.tau)
+```
+
+## Add Meta Data
+```{r}
+sample_map <- c("CEF1", "CEM1", "CEM2", "CPF1", "CPM1","CPM2","TEF1","TEM1","TEM2","TPF1","TPM1","TPM2")
+apoe.cko.tau$sample <- sapply(as.integer(gsub(colnames(apoe.cko.tau), pattern = "[ACGT]+-([0-9]+)", replacement = "\\1")), function(x) sample_map[x])
+apoe.cko.tau$sample %<>% factor(levels = sample_map)
+Idents(apoe.cko.tau) <- apoe.cko.tau$sample
+table(apoe.cko.tau$sample)
+
+treatment_map <- c("C+E", "C+E","C+E", "C+P", "C+P", "C+P", "T+E", "T+E", "T+E", "T+E", "T+P", "T+P", "T+P")
+apoe.cko.tau$treatment <- sapply(as.integer(apoe.cko.tau$sample), function(x) treatment_map[x])
+apoe.cko.tau$treatment %<>% factor(levels = c("C+E", "C+P", "T+E", "T+P"))
+table(apoe.cko.tau$treatment)
+
+apoe.cko.tau$apoe <- ifelse(gsub(apoe.cko.tau$sample, pattern = "(^[CT]).*", replacement = "\\1") == "C", yes = "Corn-oil", no = "Tamoxifen")
+apoe.cko.tau$apoe %<>% factor(levels = c("Corn-oil", "Tamoxifen"))
+table(apoe.cko.tau$apoe)
+
+apoe.cko.tau$aav <- ifelse(gsub(apoe.cko.tau$sample, pattern = "^[CT]([EP]).*", replacement = "\\1") == "E", yes = "EGFP", no = "P301L")
+apoe.cko.tau$aav %<>% factor(levels = c("EGFP", "P301L"))
+table(apoe.cko.tau$aav)
+
+apoe.cko.tau$sex <- ifelse(gsub(apoe.cko.tau$sample, pattern = "^[CT][EP]([MF]).*", replacement = "\\1") == "M", yes = "Male", no = "Female")
+apoe.cko.tau$sex %<>% factor(levels = c("Male", "Female"))
+
+apoe.cko.tau$batch <- gsub(apoe.cko.tau$sample, pattern = "^[CT][EP][MF]([12])", replacement = "\\1")
+table(apoe.cko.tau$batch)
+```
+
+```{r}
+apoe.cko.tau %<>% PercentageFeatureSet(pattern = "^mt-", col.name = "percent.mito")
+apoe.cko.tau %<>% PercentageFeatureSet(pattern = "^Rpl", col.name = "percent.ribo")
+apoe.cko.tau %<>% PercentageFeatureSet(pattern = "^Rpl|^mt-", col.name = "percent.ribo.mito")
+```
+
+
+```{r}
+VlnPlot(apoe.cko.tau, features = c("nCount_RNA"), pt.size = 0) + geom_hline(yintercept = 10000)
+VlnPlot(apoe.cko.tau, features = c("nFeature_RNA"), pt.size = 0) + geom_hline(yintercept = 700) + geom_hline(yintercept = 3000)
+VlnPlot(apoe.cko.tau, features = c("percent.mito"), pt.size = 0) + geom_hline(yintercept = 30)
+VlnPlot(apoe.cko.tau, features = c("percent.ribo"), pt.size = 0) + geom_hline(yintercept = 10)
+VlnPlot(apoe.cko.tau, features = c("percent.ribo.mito"), pt.size = 0) + geom_hline(yintercept = 35)
+```
+
+```{r}
+FeatureScatter(apoe.cko.tau, feature1 = "percent.mito", feature2 = "nCount_RNA")
+FeatureScatter(apoe.cko.tau, feature1 = "percent.mito", feature2 = "nFeature_RNA")
+FeatureScatter(apoe.cko.tau, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+```{r}
+apoe.cko.tau.RAW <- apoe.cko.tau #save raw counts to look at later
+apoe.cko.tau %<>% subset(percent.mito < 30 & nFeature_RNA > 700 & nFeature_RNA < 3000 & nCount_RNA < 10000)
+```
+
+```{r}
+ncol(apoe.cko.tau)
+table(apoe.cko.tau$sample)
+median(apoe.cko.tau$nFeature_RNA)
+median(apoe.cko.tau$nCount_RNA)
+```
+
+```{r}
+VlnPlot(apoe.cko.tau, features = c("nCount_RNA"), pt.size = 0)
+VlnPlot(apoe.cko.tau, features = c("nFeature_RNA"), pt.size = 0)
+VlnPlot(apoe.cko.tau, features = c("percent.mito"), pt.size = 0)
+VlnPlot(apoe.cko.tau, features = c("percent.ribo"), pt.size = 0)
+VlnPlot(apoe.cko.tau, features = c("percent.ribo.mito"), pt.size = 0)
+```
+
+```{r}
+apoe.cko.tau %<>% subset(sample %in% c("CEF1", "CEM1", "CPF1", "CPM1", "CPM2"))
+apoe.cko.tau %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+```
+
+```{r}
+apoe.cko.tau %<>% RunPCA()
+```
+
+```{r}
+apoe.cko.tau %<>% FindNeighbors(dims = 1:30)
+apoe.cko.tau %<>% FindClusters(res = 0.3)
+```
+
+```{r}
+apoe.cko.tau %<>% RunUMAP(dims = 1:30)
+```
+
+
+```{r}
+DimPlot(apoe.cko.tau, label = T, group.by  = "SCT_snn_res.0.3")
+DimPlot(apoe.cko.tau, group.by = "sex")
+DimPlot(apoe.cko.tau, group.by = "aav")
+```
+
+```{r}
+table(Idents(apoe.cko.tau))
+```
+
+```{r}
+apoe.cko.tau$sample %<>% factor(levels = c("CEF1", "CEM1", "CPF1", "CPM1", "CPM2"))
+table(apoe.cko.tau$sample, Idents(apoe.cko.tau)) / as.vector(table(apoe.cko.tau$sample))
+```
+
+```{r}
+sample.props <- data.frame(table(apoe.cko.tau$sample, Idents(apoe.cko.tau)) / as.vector(table(apoe.cko.tau$sample)))
+colnames(sample.props) <- c("Sample", "Cluster", "Prop")
+sample.props$Tau <- gsub(pattern = "C([E|P])[M|F][1|2]", replacement = "\\1", sample.props$Sample)
+sample.props$Sex <- gsub(pattern = "C[E|P]([M|F])[1|2]", replacement = "\\1", sample.props$Sample)
+for( i in levels(apoe.cko.tau)) {
+  tmp.props <- filter(sample.props, Cluster == i)
+  print(tmp.props %>% group_by(Tau) %>% summarize(Mean = mean(Prop), SEM = sd(Prop)/sqrt(n())) %>%
+    ggplot(aes(x = Tau, y = Mean, fill = Tau)) + 
+    geom_bar(stat = "identity") + scale_fill_manual(values = hue_pal()(2)[2:1]) +
+    geom_errorbar(stat = "identity", mapping = aes(ymax = Mean + SEM, ymin = Mean - SEM), width = .5) +
+    geom_jitter(tmp.props, mapping = aes(x = Tau, y = Prop, shape = Sex)) +
+    ggtitle(paste0("Cluster ", i))) 
+}
+```
+
+```{r}
+table(apoe.cko.tau$sample)
+```
+
+
+```{r}
+VlnPlot(apoe.cko.tau, features = c("nCount_RNA", "nFeature_RNA", "percent.mito"), pt.size = 0, combine = F)
+```
+
+
+```{r}
+a <- lapply(levels(apoe.cko.tau), function(x) FindMarkers(apoe.cko.tau, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(clust = x))
+names(a) <- paste0("global.clust",levels(apoe.cko.tau))
+apoe.cko.tau@misc$global.markers <- a
+```
+
+```{r}
+for (markers in apoe.cko.tau@misc$global.markers) {
+  print(markers)
+}
+```
+
+```{r}
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Clu", "Aldoc", "Slc1a2", "Mt1"), col.name = "percent.astro", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Cx3cr1", "P2ry12", "C1qa", "Ctss"), col.name = "percent.micro", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Plp1", "Mag", "Mbp", "Mobp"), col.name = "percent.oligo", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Snap25", "Syt1", "Meg3", "Snhg11"), col.name = "percent.neuro", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Cldn5", "Flt1", "Cdh5", "Itm2a"), col.name = "percent.endo", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Vtn", "Rgs5", "Kcnj8", "Pdgfrb"), col.name = "percent.peri", assay = "RNA")
+apoe.cko.tau %<>% PercentageFeatureSet(features = c("Pf4", "Mrc1", "F13a1", "Dab2"), col.name = "percent.macro")
+apoe.cko.tau %<>% PercentageFeatureSet(pattern = "^Hb[a|b]-", col.name = "percent.rbc", assay = "RNA")
+```
+
+```{r}
+VlnPlot(apoe.cko.tau, features = c("percent.astro"), pt.size = 0, group.by = "sample", idents = levels(apoe.cko.tau)[-c(11,13)])
+```
+
+```{r}
+VlnPlot(apoe.cko.tau, features = c("percent.astro", "percent.micro", "percent.oligo", "percent.neuro", "percent.endo", "percent.peri", "percent.macro"), pt.size = 0, combine = F)
+```
+
+
+### Clean Cluster 0
+```{r cleanClust0}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust0 <- subset(apoe.cko.tau, seurat_clusters == 0)
+clust0 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust0 %<>% RunPCA()
+clust0 %<>% FindNeighbors(dims = 1:30)
+clust0 %<>% FindClusters(res = .6)
+clust0 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust0, label = T)
+DimPlot(clust0, group.by = "sample")
+DimPlot(clust0, group.by = "aav")
+```
+
+```{r}
+clust0$subclust <- Idents(clust0)
+VlnPlot(clust0, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust0), function(x) FindMarkers(clust0, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust0.sub",levels(clust0))
+clust0@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust0@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust0, features = c("Exosc2", "Gm42418", "AY036118", "Xist"), pt.size = 0, ncol = 2)
+VlnPlot(clust0, features = c("Exosc2", "Gm42418", "AY036118", "Xist"), pt.size = 0, ncol = 2, group.by = "sample")
+```
+
+
+```{r}
+VlnPlot(clust0, features = c("percent.astro","percent.micro", "percent.oligo", "percent.endo", "percent.neuro"), pt.size = 0, combine = F)
+```
+
+```{r}
+cells.keep <- WhichCells(clust0, expression = nCount_RNA < 4000 & percent.astro < 0.5)
+```
+
+### Clean Cluster 1
+```{r cleanClust1}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust1 <- subset(apoe.cko.tau, seurat_clusters == 1)
+clust1 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust1 %<>% RunPCA()
+clust1 %<>% FindNeighbors(dims = 1:30)
+clust1 %<>% FindClusters(res = .6)
+clust1 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust1, label = T)
+DimPlot(clust1, group.by = "sex")
+DimPlot(clust1, group.by = "sample")
+DimPlot(clust1, group.by = "aav")
+```
+
+```{r}
+clust1$subclust <- Idents(clust1)
+VlnPlot(clust1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust1), function(x) FindMarkers(clust1, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust1.sub",levels(clust1))
+clust1@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust1@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust1, features = c("percent.astro"), group.by = "sample", pt.size = 0)
+```
+
+```{r}
+VlnPlot(clust1, features = c("percent.astro","percent.micro", "percent.oligo", "percent.endo", "percent.neuro"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust1, expression = nCount_RNA < 4000 & percent.astro < 0.5 & subclust != 5)
+cells.keep <- c(cells.keep, tmp.cells.keep)
+```
+
+
+
+### Clean Cluster 2
+```{r cleanClust2}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust2 <- subset(apoe.cko.tau, seurat_clusters == 2)
+clust2 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust2 %<>% RunPCA()
+clust2 %<>% FindNeighbors(dims = 1:30)
+clust2 %<>% FindClusters(res = .6)
+clust2 %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+DimPlot(clust2, label = T)
+DimPlot(clust2, group.by = "sample")
+DimPlot(clust2, group.by = "aav")
+```
+
+```{r}
+clust2$subclust <- Idents(clust2)
+VlnPlot(clust2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust2), function(x) FindMarkers(clust2, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust2.sub",levels(clust2))
+clust2@misc$subclust.markers <- a
+```
+
+
+```{r}
+for(markers in clust2@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust2, features = c("percent.astro","percent.micro", "percent.oligo", "percent.endo", "percent.neuro"), pt.size = 0, combine = F)
+```
+
+
+```{r}
+tmp.cells.keep <- WhichCells(clust2, expression = percent.astro < 0.5 & nCount_RNA < 4000)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 3
+```{r cleanClust3}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust3 <- subset(apoe.cko.tau, seurat_clusters == 3)
+clust3 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust3 %<>% RunPCA()
+clust3 %<>% FindNeighbors(dims = 1:30)
+clust3 %<>% FindClusters(res = .6)
+clust3 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust3, label = T)
+DimPlot(clust3, group.by = "sample")
+DimPlot(clust3, group.by = "aav")
+```
+
+```{r}
+clust3$subclust <- Idents(clust3)
+VlnPlot(clust3, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust3), function(x) FindMarkers(clust3, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = 0.1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust3.sub",levels(clust3))
+clust3@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust3@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust3, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust3, expression = nCount_RNA < 4000 & percent.astro < 0.5 & subclust != 5)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+### Clean Cluster 4
+```{r cleanClust4}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust4 <- subset(apoe.cko.tau, seurat_clusters == 4)
+clust4 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust4 %<>% RunPCA()
+clust4 %<>% FindNeighbors(dims = 1:30)
+clust4 %<>% FindClusters(res = .6)
+clust4 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust4, label = T)
+DimPlot(clust4, group.by = "sample")
+DimPlot(clust4, group.by = "aav")
+```
+
+```{r}
+clust4$subclust <- Idents(clust4)
+VlnPlot(clust4, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust4), function(x) FindMarkers(clust4, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust4.sub",levels(clust4))
+clust4@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust4@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust4, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo", "percent.peri"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust4, expression = nCount_RNA < 5000 & percent.astro < 0.5 & percent.micro < 0.5 & subclust != 1 & subclust != 4)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 5
+```{r cleanClust5}
+clust5 <- subset(apoe.cko.tau, seurat_clusters == 5)
+clust5 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust5 %<>% RunPCA()
+clust5 %<>% FindNeighbors(dims = 1:30)
+clust5 %<>% FindClusters(res = .6)
+clust5 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust5, label = T)
+DimPlot(clust5, group.by = "sample")
+DimPlot(clust5, group.by = "aav")
+```
+
+```{r}
+clust5$subclust <- Idents(clust5)
+VlnPlot(clust5, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust5), function(x) FindMarkers(clust5, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust5.sub",levels(clust5))
+clust5@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust5@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust5, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust5, expression = nCount_RNA < 4000 & percent.astro < 0.5 & subclust != 3)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 6
+```{r cleanClust6}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust6 <- subset(apoe.cko.tau, seurat_clusters == 6)
+clust6 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust6 %<>% RunPCA()
+clust6 %<>% FindNeighbors(dims = 1:30)
+clust6 %<>% FindClusters(res = .6)
+clust6 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust6, label = T)
+DimPlot(clust6, group.by = "sample")
+DimPlot(clust6, group.by = "aav")
+```
+
+```{r}
+clust6$subclust <- Idents(clust6)
+VlnPlot(clust6, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust6), function(x) FindMarkers(clust6, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust6.sub",levels(clust6))
+clust6@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust6@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust6, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust6, expression = nCount_RNA < 4000 & percent.astro < 0.5 & percent.micro < 0.5 & subclust != 1)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+### Clean Cluster 7
+```{r cleanClust7}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust7 <- subset(apoe.cko.tau, seurat_clusters == 7)
+clust7 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust7 %<>% RunPCA()
+clust7 %<>% FindNeighbors(dims = 1:30)
+clust7 %<>% FindClusters(res = .6)
+clust7 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust7, label = T)
+DimPlot(clust7, group.by = "sample")
+DimPlot(clust7, group.by = "aav")
+```
+
+```{r}
+clust7$subclust <- Idents(clust7)
+VlnPlot(clust7, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust7), function(x) FindMarkers(clust7, ident.1 = x, max.cells.per.ident = 1000, logfc.threshold = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust7.sub",levels(clust7))
+clust7@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust7@misc$subclust.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(clust7, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust7, expression = nCount_RNA < 4000 & percent.astro < 0.5 & subclust != 4)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 8
+```{r cleanClust8}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust8 <- subset(apoe.cko.tau, seurat_clusters == 8)
+clust8 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust8 %<>% RunPCA()
+clust8 %<>% FindNeighbors(dims = 1:30)
+clust8 %<>% FindClusters(res = .6)
+clust8 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust8, label = T)
+DimPlot(clust8, group.by = "sample")
+DimPlot(clust8, group.by = "aav")
+```
+
+```{r}
+clust8$subclust <- Idents(clust8)
+VlnPlot(clust8, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust8), function(x) FindMarkers(clust8, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust8.sub",levels(clust8))
+clust8@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust8@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust8, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust8, expression = nCount_RNA < 4000 & percent.astro < 0.05)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+### Clean Cluster 9
+```{r cleanClust9}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust9 <- subset(apoe.cko.tau, seurat_clusters == 9)
+clust9 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust9 %<>% RunPCA()
+clust9 %<>% FindNeighbors(dims = 1:30)
+clust9 %<>% FindClusters(res = .6)
+clust9 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust9, label = T)
+DimPlot(clust9, group.by = "sample")
+DimPlot(clust9, group.by = "aav")
+```
+
+```{r}
+clust9$subclust <- Idents(clust9)
+VlnPlot(clust9, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust9), function(x) FindMarkers(clust9, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust9.sub",levels(clust9))
+clust9@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust9@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust9, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust9, expression = nCount_RNA < 4000 & percent.astro < 0.5)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+### Clean Cluster 10
+```{r cleanClust10}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust10 <- subset(apoe.cko.tau, seurat_clusters == 10)
+clust10 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust10 %<>% RunPCA()
+clust10 %<>% FindNeighbors(dims = 1:30)
+clust10 %<>% FindClusters(res = .6)
+clust10 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust10, label = T)
+DimPlot(clust10, group.by = "sample")
+DimPlot(clust10, group.by = "aav")
+```
+
+```{r}
+clust10$subclust <- Idents(clust10)
+VlnPlot(clust10, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust10), function(x) FindMarkers(clust10, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust10.sub",levels(clust10))
+clust10@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust10@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust10, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust10, expression = nCount_RNA < 4000 & percent.micro < 0.5 & subclust != 2)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 11
+```{r cleanClust11}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust11 <- subset(apoe.cko.tau, seurat_clusters == 11)
+clust11 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust11 %<>% RunPCA()
+clust11 %<>% FindNeighbors(dims = 1:30)
+clust11 %<>% FindClusters(res = .6)
+clust11 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust11, label = T)
+DimPlot(clust11, group.by = "sample")
+DimPlot(clust11, group.by = "aav")
+```
+
+```{r}
+clust11$subclust <- Idents(clust11)
+VlnPlot(clust11, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust11), function(x) FindMarkers(clust11, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust11.sub",levels(clust11))
+clust11@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust11@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust11, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+
+```{r}
+tmp.cells.keep <- WhichCells(clust11, expression = nCount_RNA < 4000 & percent.astro < 0.5 & percent.micro < 0.5 & subclust != 2)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+### Clean Cluster 12
+```{r cleanClust12}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust12 <- subset(apoe.cko.tau, seurat_clusters == 12)
+clust12 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust12 %<>% RunPCA()
+clust12 %<>% FindNeighbors(dims = 1:30)
+clust12 %<>% FindClusters(res = .6)
+clust12 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust12, label = T)
+DimPlot(clust12, group.by = "sample")
+DimPlot(clust12, group.by = "aav")
+```
+
+```{r}
+clust12$subclust <- Idents(clust12)
+VlnPlot(clust12, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust12), function(x) FindMarkers(clust12, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust12.sub",levels(clust12))
+clust12@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust12@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust12, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust12, expression = nCount_RNA < 4000 & percent.micro < 0.5)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 13
+```{r cleanClust13}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust13 <- subset(apoe.cko.tau, seurat_clusters == 13)
+clust13 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust13 %<>% RunPCA()
+clust13 %<>% FindNeighbors(dims = 1:30)
+clust13 %<>% FindClusters(res = .6)
+clust13 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust13, label = T)
+DimPlot(clust13, group.by = "sample")
+DimPlot(clust13, group.by = "aav")
+```
+
+```{r}
+clust13$subclust <- Idents(clust13)
+VlnPlot(clust13, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust13), function(x) FindMarkers(clust13, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust13.sub",levels(clust13))
+clust13@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust13@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust13, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo", "percent.macro"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust13, expression = nCount_RNA < 4000 & percent.astro < 0.5 & subclust != 1)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 14
+```{r cleanClust14}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust14 <- subset(apoe.cko.tau, seurat_clusters == 14)
+clust14 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust14 %<>% RunPCA()
+clust14 %<>% FindNeighbors(dims = 1:30)
+clust14 %<>% FindClusters(res = .6)
+clust14 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust14, label = T)
+DimPlot(clust14, group.by = "sample")
+DimPlot(clust14, group.by = "aav")
+```
+
+
+```{r}
+clust14$subclust <- Idents(clust14)
+VlnPlot(clust14, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust14), function(x) FindMarkers(clust14, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust14.sub",levels(clust14))
+clust14@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust14@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust14, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust14, expression = nCount_RNA < 5000 & subclust != 2)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 15
+```{r cleanClust15}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust15 <- subset(apoe.cko.tau, seurat_clusters == 15)
+clust15 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust15 %<>% RunPCA()
+clust15 %<>% FindNeighbors(dims = 1:30)
+clust15 %<>% FindClusters(res = .6)
+clust15 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust15, label = T)
+DimPlot(clust15, group.by = "sample")
+DimPlot(clust15, group.by = "aav")
+```
+
+```{r}
+clust15$subclust <- Idents(clust15)
+VlnPlot(clust15, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust15), function(x) FindMarkers(clust15, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust15.sub",levels(clust15))
+clust15@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust15@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust15, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo", "percent.rbc"), pt.size = 0, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust15, expression = nCount_RNA < 5000 & subclust == 1)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+### Clean Cluster 16
+```{r cleanClust16}
+apoe.cko.tau$seurat_clusters = Idents(apoe.cko.tau)
+clust16 <- subset(apoe.cko.tau, seurat_clusters == 16)
+clust16 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust16 %<>% RunPCA()
+clust16 %<>% FindNeighbors(dims = 1:30)
+clust16 %<>% FindClusters(res = .6)
+clust16 %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+DimPlot(clust16, label = T)
+DimPlot(clust16, group.by = "aav")
+DimPlot(clust16, group.by = "sample")
+```
+
+```{r}
+clust16$subclust <- Idents(clust16)
+VlnPlot(clust16, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust16), function(x) FindMarkers(clust16, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust16.sub",levels(clust16))
+clust16@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust16@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(clust16, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo", "percent.rbc"), pt.size = 0, combine = F)
+```
+
+Endothelial RBC contamination --> remove whole cluster
+```{r}
+#tmp.cells.keep <- WhichCells(clust16, expression = nCount_RNA < 5000 & percent.micro < 0.5 & subclust %in% c(0,2,3))
+#cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+
+### Clean Cluster 17
+```{r cleanClust17}
+clust17 <- subset(apoe.cko.tau, seurat_clusters %in% c(17,18))
+clust17 %<>% SCTransform(vars.to.regress = c("percent.mito", "sex"))
+clust17 %<>% RunPCA()
+clust17 %<>% FindNeighbors(dims = 1:30)
+clust17 %<>% FindClusters(res = .8)
+clust17 %<>% RunUMAP(dims = 1:30)
+DimPlot(clust17, label = T)
+```
+
+```{r}
+clust17$subclust <- Idents(clust17)
+VlnPlot(clust17, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.mito.ribo"), pt.size = 0, combine = F)
+```
+
+```{r}
+a <- lapply(levels(clust17), function(x) FindMarkers(clust17, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("clust17.sub",levels(clust17))
+clust17@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in clust17@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+neutorphils and fibroblast like cells
+```{r}
+VlnPlot(clust17, features = c("percent.micro", "percent.neuro", "percent.astro", "percent.endo", "percent.oligo"), pt.size = 0.1, combine = F)
+```
+
+```{r}
+tmp.cells.keep <- WhichCells(clust17, expression = percent.micro < 1 & percent.astro < 1)
+cells.keep <- c(tmp.cells.keep, cells.keep)
+```
+
+
+```{r}
+length(cells.keep)
+table(apoe.cko.tau$seurat_clusters)
+table(apoe.cko.tau$seurat_clusters[cells.keep])
+table(apoe.cko.tau$seurat_clusters[cells.keep]) / as.vector(table(apoe.cko.tau$seurat_clusters))
+```
+
+
+## Run Cleaned Data
+```{r}
+apoe.cko.tau.cleaned <- SubsetData(apoe.cko.tau, cells = cells.keep)
+```
+
+```{r}
+table(clust0$sample)
+```
+
+```{r}
+table(apoe.cko.tau.cleaned$sample)
+table(apoe.cko.tau.cleaned$sex)
+table(apoe.cko.tau.cleaned$apoe)
+table(apoe.cko.tau.cleaned$aav)
+table(apoe.cko.tau.cleaned$batch)
+table(apoe.cko.tau.cleaned$apoe, apoe.cko.tau.cleaned$aav)
+```
+
+```{r}
+apoe.cko.tau.cleaned %<>% SCTransform(vars.to.regress = c("percent.mito", "sex", "batch"))
+```
+
+```{r}
+apoe.cko.tau.cleaned %<>% RunPCA()
+```
+
+```{r}
+apoe.cko.tau.cleaned %<>% FindNeighbors(dims = 1:30)
+apoe.cko.tau.cleaned %<>% FindClusters(res = 0.3)
+```
+
+```{r}
+apoe.cko.tau.cleaned %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+DimPlot(apoe.cko.tau.cleaned, label = T)
+DimPlot(apoe.cko.tau.cleaned, group.by = "sex")
+DimPlot(apoe.cko.tau.cleaned, group.by = "aav") + scale_color_manual(values = hue_pal()(2)[2:1])
+DimPlot(apoe.cko.tau.cleaned, group.by = "sample")
+```
+
+```{r}
+#pdf("figures/cleaned/umap_by_seurat_default.pdf")
+DimPlot(apoe.cko.tau.cleaned, label = T)
+#dev.off()
+#pdf("figures/cleaned/umap_by_sex.pdf")
+DimPlot(apoe.cko.tau.cleaned, group.by = "sex")
+#dev.off()
+#pdf("figures/cleaned/umap_by_seurat_tau.pdf")
+DimPlot(apoe.cko.tau.cleaned, group.by = "aav") + scale_color_manual(values = hue_pal()(2)[2:1])
+#dev.off()
+#pdf("figures/cleaned/umap_by_sample.pdf")
+DimPlot(apoe.cko.tau.cleaned, group.by = "sample")
+#dev.off()
+```
+
+```{r}
+a <- apoe.cko.tau.cleaned %>% subset(seurat_clusters == 2) %>% GetAssayData(assay = "SCT") %>% apply(1, mean)
+a <- apoe.cko.tau.cleaned %>% subset(seurat_clusters == 0) %>% GetAssayData(assay = "SCT") %>% apply(1, mean)
+
+```
+
+```{r}
+VlnPlot(apoe.cko.tau.cleaned, idents = c(0,1), group.by = "sample", features = c("Cd9", "H2-D1", "H2-K1", "Cd81"), pt.size = 0, assay = "RNA", ncol = 2)
+```
+
+```{r}
+clust0vs1 <- FindMarkers(apoe.cko.tau.cleaned, ident.1 = 0, ident.2 = 1)
+clust0vs1
+```
+
+```{r}
+Idents(apoe.cko.tau.cleaned) <- apoe.cko.tau.cleaned$SCT_snn_res.0.3
+apoe.cko.tau.cleaned$cell_type <- "Microglia"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(2,4,6,12))] <- "Activated Microglia"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = 3)] <- "Endothelia"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = 5)] <- "Neurons"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(7,9))] <- "Astrocytes"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(8))] <- "T Cells"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(11))] <- "Choroid Plexus"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(13))] <- "Fibroblast-like Cells"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(14))] <- "Neural Stem Cells"
+apoe.cko.tau.cleaned$cell_type[WhichCells(apoe.cko.tau.cleaned, idents = c(15))] <- "Neutrophils"
+apoe.cko.tau.cleaned$cell_type %<>% factor(levels = c("Microglia", "Activated Microglia", "Endothelia", "Neurons", "Astrocytes", "T Cells", "Choroid Plexus", "Fibroblast-like Cells", "Neural Stem Cells", "Neutrophils"))
+pdf("figures/cleaned/umap_by_cell_type.activated.labeled.pdf")
+DimPlot(apoe.cko.tau.cleaned, group.by = "cell_type", label = T, repel = T)
+dev.off()
+```
+
+```{r}
+sample.props <- as.data.frame(table(apoe.cko.tau.cleaned$sample, apoe.cko.tau.cleaned$cell_type) * 100 / as.vector(table(apoe.cko.tau.cleaned$sample)))
+colnames(sample.props) <- c("Sample", "cell_type", "Prop")
+pdf("figures/cleaned/Cell_type_proportions.activated.stacked_bargraph.pdf")
+ggplot(sample.props, aes(x = Sample, y = Prop, fill = cell_type)) +
+  geom_bar(stat = "identity", color = "black") + 
+  ylab("Fraction of Cells in Cell Type") +
+  labs(fill = "Cell Type")
+dev.off()
+```
+
+```{r}
+a <- lapply(levels(apoe.cko.tau.cleaned), function(x) FindMarkers(apoe.cko.tau.cleaned, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(clust = x))
+names(a) <- paste0("global.clust",levels(apoe.cko.tau.cleaned))
+apoe.cko.tau.cleaned@misc$global.markers <- a
+```
+
+```{r}
+for (markers in apoe.cko.tau.cleaned@misc$global.markers) {
+  print(markers)
+}
+```
+
+```{r}
+Idents(apoe.cko.tau.cleaned) <- apoe.cko.tau.cleaned$cell_type
+a <- lapply(levels(apoe.cko.tau.cleaned), function(x) FindMarkers(apoe.cko.tau.cleaned, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(clust = x))
+names(a) <- paste0("celltype_",levels(apoe.cko.tau.cleaned))
+apoe.cko.tau.cleaned@misc$cell_type.markers <- a
+```
+
+```{r}
+apoe.cko.tau.cleaned@misc$cell_type.markers.combined <- NULL
+for(markers in apoe.cko.tau.cleaned@misc$cell_type.markers) {
+  print(markers)
+  apoe.cko.tau.cleaned@misc$cell_type.markers.combined %<>% rbind(markers)
+}
+
+```
+
+```{r}
+table(apoe.cko.tau.cleaned$cell_type)
+apoe.cko.tau.cleaned@misc$cell_type.markers.combined %>% group_by(clust) %>% top_n(n = 10, wt = avg_logFC)
+heatmap.genes <- c("P2ry12", "Cx3cr1", "Tmem119", "Selplg", "Sparc", "Cd74", "Cd9", "Lyz2", "H2-D1", "Ftl1", "Cldn5", "Flt1", "Pltp", "Bsg", "Meg3", "Snhg11", "Gria2", "Ahi1", "Slc1a2", "Mt1", "Plpp3", "Clu", "Apoe", "Ms4a4b", "Nkg7", "Ccl5", "Cd3e", "Ttr", "Enpp2", "Chchd10", "Mgp", "Slc38a2", "Nov", "Stmn1", "Ccnd2", "Sox11", "S100a8", "Ngp", "Camp")
+pdf("figures/cleaned/cell_type_markers.heatmap.pdf", width = 18, height = 12)
+DoHeatmap(apoe.cko.tau.cleaned, features = heatmap.genes, group.by = "cell_type", cells = WhichCells(apoe.cko.tau.cleaned, downsample = 1000, seed = 0), angle = 90, draw.lines = T, disp.min = -2, disp.max = 2)
+dev.off()
+```
+
+```{r}
+table(apoe.cko.tau.cleaned$cell_type)
+```
+
+```{r}
+for(marker in heatmap.genes) {
+ print(VlnPlot(apoe.cko.tau.cleaned, features = marker, pt.size = 0, group.by = "cell_type")) 
+}
+```
+
+
+```{r}
+VlnPlot(apoe.cko.tau.cleaned, features = c("nFeature_RNA", "nCount_RNA", "percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = 0, combine = F)
+```
+
+```{r}
+VlnPlot(apoe.cko.tau.cleaned, features = c("percent.astro", "percent.micro", "percent.endo", "percent.neuro", "percent.oligo"), pt.size = 0, combine = F)
+```
+
+```{r}
+Idents(apoe.cko.tau.cleaned) <- apoe.cko.tau.cleaned$SCT_snn_res.0.3
+sample.props <- data.frame(table(apoe.cko.tau.cleaned$sample, Idents(apoe.cko.tau.cleaned)) / as.vector(table(apoe.cko.tau.cleaned$sample)))
+colnames(sample.props) <- c("Sample", "Cluster", "Prop")
+sample.props$Tau <- gsub(pattern = "C([E|P])[M|F][1|2]", replacement = "\\1", sample.props$Sample)
+sample.props$Sex <- gsub(pattern = "C[E|P]([M|F])[1|2]", replacement = "\\1", sample.props$Sample)
+for( i in levels(apoe.cko.tau.cleaned)) {
+  tmp.props <- filter(sample.props, Cluster == i)
+  pdf(paste0("figures/cleaned/cluster_enrich_bargraph/clust",i,".pdf"))
+  print(tmp.props %>% group_by(Tau) %>% summarize(Mean = mean(Prop), SEM = sd(Prop)/sqrt(n())) %>%
+    ggplot(aes(x = Tau, y = Mean, fill = Tau)) + 
+    geom_bar(stat = "identity") + scale_fill_manual(values = hue_pal()(2)[2:1]) +
+    geom_errorbar(stat = "identity", mapping = aes(ymax = Mean + SEM, ymin = Mean - SEM), width = .5) +
+    geom_jitter(tmp.props, mapping = aes(x = Tau, y = Prop, shape = Sex)) +
+    ggtitle(paste0("Cluster ", i)) + ylab("Cluster Proportion")) 
+  dev.off()
+}
+```
+
+```{r}
+Idents(apoe.cko.tau.cleaned) <- apoe.cko.tau.cleaned$cell_type
+sample.props <- data.frame(table(apoe.cko.tau.cleaned$sample, Idents(apoe.cko.tau.cleaned)) / as.vector(table(apoe.cko.tau.cleaned$sample)))
+colnames(sample.props) <- c("Sample", "Cluster", "Prop")
+sample.props$Tau <- gsub(pattern = "C([E|P])[M|F][1|2]", replacement = "\\1", sample.props$Sample)
+sample.props$Sex <- gsub(pattern = "C[E|P]([M|F])[1|2]", replacement = "\\1", sample.props$Sample)
+for( i in levels(apoe.cko.tau.cleaned)) {
+  tmp.props <- filter(sample.props, Cluster == i)
+ pdf(paste0("figures/cleaned/celltype_enrich_bargraph/",i,".pdf"))
+  print(tmp.props %>% group_by(Tau) %>% summarize(Mean = mean(Prop), SEM = sd(Prop)/sqrt(n())) %>%
+    ggplot(aes(x = Tau, y = Mean, fill = Tau)) + 
+    geom_bar(stat = "identity") + scale_fill_manual(values = hue_pal()(2)[2:1]) +
+    geom_errorbar(stat = "identity", mapping = aes(ymax = Mean + SEM, ymin = Mean - SEM), width = .5) +
+    geom_jitter(tmp.props, mapping = aes(x = Tau, y = Prop, shape = Sex)) +
+    ggtitle(i) + ylab("Cell Type Proportion"))
+  dev.off()
+}
+```
+
+```{r}
+apoe.cko.tau.cleaned$raw_clusters <- apoe.cko.tau.cleaned$seurat_clusters
+apoe.cko.tau.cleaned$seurat_clusters <- Idents(apoe.cko.tau.cleaned)
+```
+
+```{r}
+micros.cleaned <- subset(apoe.cko.tau.cleaned, cell_type %in% c("Homeostatic Microglia", "Activated Microglia"))
+micros.cleaned %<>% SCTransform(vars.to.regress = c("percent.mito", "percent.astro", "sex", "batch"))
+micros.cleaned %<>% RunPCA()
+micros.cleaned %<>% FindNeighbors(dims = 1:30) 
+micros.cleaned %<>% FindClusters(res = .3)
+micros.cleaned$subclust <- Idents(micros.cleaned)
+micros.cleaned %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+micros.cleaned %>% DimPlot(label = T)
+micros.cleaned %>% DimPlot(group.by = "sex")
+micros.cleaned %>% DimPlot(group.by = "sample")
+micros.cleaned %>% DimPlot(group.by = "aav")
+```
+
+
+```{r}
+a <- lapply(levels(micros.cleaned), function(x) FindMarkers(micros.cleaned, ident.1 = x, max.cells.per.ident = 1000) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("micros.cleaned.sub",levels(micros.cleaned))
+micros.cleaned@misc$subclust.markers <- a
+```
+
+```{r}
+for(markers in micros.cleaned@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+VlnPlot(micros.cleaned, features = c("Xist", "Ccl5", "Gm42418", "S100a5", "Ptgds", "Apod", "Tpt1", "Exosc2", "AY036118"), pt.size = 0, assay = "SCT", group.by = c("sample", "subclust"), combine = F)
+```
+
+```{r}
+VariableFeatures(micros.cleaned) <- VariableFeatures(micros.cleaned)[-which(VariableFeatures(micros.cleaned) %in% c("Xist", "Gm42418", "Ptgds", "Apod", "Exosc2", "Exosc2", "AY036118", "S100a5", "Ccl5"))]
+micros.cleaned %<>% RunPCA()
+micros.cleaned %<>% FindNeighbors(dims = 1:20) 
+micros.cleaned %<>% FindClusters(res = .3)
+micros.cleaned$subclust <- Idents(micros.cleaned)
+micros.cleaned %<>% RunUMAP(dims = 1:20)
+```
+
+```{r}
+#pdf("figures/cleaned/microglia/umap_by_default_seurat.pdf")
+micros.cleaned %>% DimPlot(label = T, group.by = "SCT_snn_res.0.3")
+#dev.off()
+#pdf("figures/cleaned/microglia/umap_by_sex.pdf")
+micros.cleaned %>% DimPlot(group.by = "sex")
+#dev.off()
+#pdf("figures/cleaned/microglia/umap_by_sample.pdf")
+micros.cleaned %>% DimPlot(group.by = "sample")
+#dev.off()
+#pdf("figures/cleaned/microglia/umap_by_tau.pdf")
+micros.cleaned %>% DimPlot(group.by = "aav")
+#dev.off()
+```
+
+```{r}
+## Reorder and Renumber idents so homeostatic is 1, and activated are higher numbers
+Idents(micros.cleaned) <- sapply(as.integer(micros.cleaned$SCT_snn_res.0.3), function(x) c("2", "3", "1", "4", "5")[x])
+levels(micros.cleaned) <- c("1", "2", "3", "4", "5")
+micros.cleaned$subclust <- Idents(micros.cleaned)
+table(Idents(micros.cleaned))
+```
+
+```{r}
+#pdf("figures/cleaned/microglia/umap_by_subclust.pdf")
+micros.cleaned %>% DimPlot(label = T)
+#dev.off()
+```
+
+```{r}
+sample.props <- as.data.frame(table(micros.cleaned$sample, micros.cleaned$subclust) * 100 / as.vector(table(micros.cleaned$sample)))
+(table(micros.cleaned$sample, micros.cleaned$subclust) / as.vector(table(micros.cleaned$sample)))
+colnames(sample.props) <- c("Sample", "Subclust", "Prop")
+#pdf("figures/cleaned/microglia/Sample_Proportions.stacked_bargraph.pdf")
+ggplot(sample.props, aes(x = Sample, y = Prop, fill = Subclust)) +
+  geom_bar(stat = "identity", color = "black") + 
+  ylab("Fraction of Cells in Subcluster") +
+  labs(fill = "Microglia\nSubcluster")
+#dev.off()
+```
+
+```{r}
+sample.props$Tau <- gsub(pattern = "C([E|P])[M|F][1|2]", replacement = "\\1", sample.props$Sample)
+sample.props$Sex <- gsub(pattern = "C[E|P]([M|F])[1|2]", replacement = "\\1", sample.props$Sample)
+for( i in levels(micros.cleaned)) {
+  tmp.props <- filter(sample.props, Subclust == i)
+  #pdf(paste0("figures/cleaned/microglia/subclust_enrich_bargraphs/Subclust",i,".bargraph.pdf"))
+  print(tmp.props %>% group_by(Tau) %>% summarize(Mean = mean(Prop), SEM = sd(Prop)/sqrt(n())) %>%
+    ggplot(aes(x = Tau, y = Mean, fill = Tau)) + 
+    geom_bar(stat = "identity") + scale_fill_manual(values = hue_pal()(2)[2:1]) +
+    geom_errorbar(stat = "identity", mapping = aes(ymax = Mean + SEM, ymin = Mean - SEM), width = .5) +
+    geom_jitter(tmp.props, mapping = aes(x = Tau, y = Prop, shape = Sex)) +
+    ggtitle(paste0("Subclust ", i)) + ylab("Fraction of Cells in Subcluster"))
+  #dev.off()
+}
+```
+
+```{r}
+a <- lapply(levels(micros.cleaned), function(x) FindMarkers(micros.cleaned, ident.1 = x, logfc.threshold = .1, min.pct = .05) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("micro.subclust",levels(micros.cleaned))
+micros.cleaned@misc$subclust.markers <- a
+write.xlsx(micros.cleaned@misc$subclust.markers, file = "figures/cleaned/microglia/subclust.markers.xlsx")
+```
+
+```{r}
+a <- lapply(combn(levels(micros.cleaned), m = 2, simplify = F), function(x) FindMarkers(micros.cleaned, ident.1 = x[1], ident.2 = x[2], logfc.threshold = .1, min.pct = .05) 
+            %>% rownames_to_column('gene') 
+            %>% mutate(test = paste(x, collapse = "vs")))
+names(a) <- sapply(combn(levels(micros.cleaned), m = 2, simplify = F), function(x) paste(x, collapse = "vs"))
+micros.cleaned@misc$pariwise.subclust.markers <- a
+write.xlsx(micros.cleaned@misc$pariwise.subclust.markers, file = "figures/cleaned/microglia/subclust_markers.pairwise.xlsx")
+```
+
+```{r}
+micros.cleaned@misc$combined.markers <- NULL
+for (markers in micros.cleaned@misc$subclust.markers) {
+  print(markers %>% arrange(desc(avg_logFC)))
+  micros.cleaned@misc$combined.markers %<>% rbind(markers %>% filter(p_val_adj < 0.01))
+}
+```
+
+```{r}
+length(unique(micros.cleaned@misc$combined.markers$gene))
+micros.cleaned@misc$combined.markers %>% filter(p_val_adj < 0.01) %>% arrange(desc(avg_logFC))
+```
+
+```{r}
+markers <- c("Cd74", "Ccl4", "Ccl3", "H2-Aa", "H2-Ab1", "H2-Eb1", "Ccl12", "H2-D1", "H2-K1", "Spp1", "Cd52", "Lyz2", "Ftl1", "Cd63", "Cd83", "Cd9", "Il1b", "Cst7", "Lpl", "Apoe", "Axl", "Ecscr", "Siglech", "Fcrls", "Gpr34", "Sparc", "Cx3cr1", "Tmem119", "Selplg", "P2ry12")
+DoHeatmap(micros.cleaned, features = markers)
+```
+
+```{r}
+heatmap.genes <- unique(micros.cleaned@misc$combined.markers[micros.cleaned@misc$combined.markers$avg_logFC > 0.2, ]$gene)
+micros.cleaned.subset %<>% ScaleData(assay = "RNA")
+tmp.matrix <- GetAssayData(micros.cleaned.subset, assay = "RNA", slot = "scale.data")[heatmap.genes, order(micros.cleaned.subset$subclust, sample(1:ncol(micros.cleaned.subset), replace = F, ncol(micros.cleaned.subset)))]
+col.annos <- micros.cleaned.subset@meta.data[colnames(tmp.matrix), c("subclust", "aav")]
+subclust.colors = hue_pal()(5)
+names(subclust.colors) <- levels(col.annos$subclust)
+pheatmap(mat = tmp.matrix, fontsize = 2, 
+         color = colorRampPalette(colors = c("blue", "white smoke", "red"))(50), annotation_col = col.annos,
+         annotation_colors = list("subclust" = subclust.colors, "aav" = c("EGFP" = "blue", "P301L" = "red")), 
+         breaks = seq(-3, 3, length.out = 51), cutree_rows = 4,
+         scale = "row", treeheight_row = 0, treeheight_col = 0, clustering_method = "ward.D2",
+         cluster_cols = F, show_colnames = F, show_rownames = T, gaps_col = c(1), file = "figures/cleaned/microglia/activated_markers.heatmap.pdf")
+write.table(heatmap.genes, file = "tmp.txt", sep = ",", quote = F, row.names = F, eol = ",")
+```
+
+```{r}
+VlnPlot(micros.cleaned, features = c(), pt.size = 0, combine = F)
+```
+
+```{r}
+for(marker in markers) {
+  pdf(paste0("figures/cleaned/microglia/activated_vlns/",marker,".pdf"))
+  print(VlnPlot(micros.cleaned, features = marker, pt.size = 0))
+  dev.off()
+}
+```
+
+```{r}
+micros.cleaned@misc$pairwise.combined.markers <- NULL
+for (markers in micros.cleaned@misc$pariwise.subclust.markers) {
+  micros.cleaned@misc$pairwise.combined.markers %<>% rbind(markers %>% filter(p_val_adj < 0.01))
+}
+```
+
+```{r}
+ordering.genes <- unique(micros.cleaned@misc$combined.markers[micros.cleaned@misc$pairwise.combined.markers$p_val_adj < 1e-2,]$gene)
+ordering.genes <- ordering.genes[-which(ordering.genes %in% c("Xist", "Gm42418", "Ptgds", "Apod", "Exosc2", "Exosc2", "AY036118", "S100a5", "Ccl5"))]
+length(ordering.genes)
+```
+
+```{r}
+Idents(micros.cleaned) <- micros.cleaned$sample
+micros.cleaned.subset <- SubsetData(micros.cleaned, max.cells.per.ident = 1000)
+Idents(micros.cleaned) <- micros.cleaned$subclust
+Idents(micros.cleaned.subset) <- micros.cleaned$subclust
+data <- as(as.matrix(GetAssayData(micros.cleaned.subset, assay = "RNA")), 'sparseMatrix')
+pd <- new('AnnotatedDataFrame', data = micros.cleaned.subset@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+
+#Construct  monocle cds
+micros.cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              lowerDetectionLimit = 0.5,
+                              expressionFamily = negbinomial.size())
+```
+
+### Run Psuedotime
+```{r}
+micros.cds %<>% estimateSizeFactors()
+micros.cds %<>% estimateDispersions()
+micros.cds %<>% setOrderingFilter(ordering.genes)
+micros.cds %<>% reduceDimension(max_components = 2, method = 'DDRTree')
+micros.cds %<>% orderCells()
+```
+
+```{r}
+plot_cell_trajectory(micros.cds)
+plot_cell_trajectory(micros.cds, color_by = "sample")
+plot_cell_trajectory(micros.cds, color_by = "subclust")
+plot_cell_trajectory(micros.cds, color_by = "aav")
+```
+
+```{r}
+prop <- as.data.frame(table(micros.cds$State, micros.cds$subclust) / as.vector(table(micros.cds$State)))
+prop %>% ggplot(aes(Var1, Freq, fill = Var2)) + 
+  geom_bar(stat= "identity") + 
+  theme(axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) +
+  ylab("Seurat Cluster Freq") +
+  xlab("Pseudotime State") +
+  labs(fill = "Seurat Cluster")
+
+prop <- as.data.frame(table(micros.cds$subclust, micros.cds$State) / as.vector(table(micros.cds$subclust)))
+prop %>% ggplot(aes(Var1, Freq, fill = Var2)) + 
+  geom_bar(stat= "identity") + 
+  theme(axis.text.x = element_text(hjust = 1, vjust = 1, angle = 45)) +
+  xlab("Seurat Cluster") +
+  ylab("Pseudotime State Freq") +
+  labs(fill = "Pseudotime State")
+```
+
+```{r}
+table(micros.cleaned$subclust)
+DimPlot(micros.cleaned, group.by = "subclust")
+activated.micros <- subset(micros.cleaned, subclust %in% c(3,4,5))
+```
+
+```{r}
+activated.micros %<>% SCTransform(vars.to.regress = c("percent.mito", "percent.astro", "sex", "batch"))
+VariableFeatures(activated.micros) <- VariableFeatures(activated.micros)[-which(VariableFeatures(activated.micros) %in% c("Xist", "Gm42418", "Ptgds", "Apod", "Exosc2", "Exosc2", "AY036118", "S100a5", "Ccl5"))]
+activated.micros %<>% RunPCA()
+activated.micros %<>% FindNeighbors(dims = 1:30)
+activated.micros %<>% FindClusters(res = 0.1)
+#activated.micros %<>% FindClusters(res = 0.6)
+activated.micros$subset <- Idents(micros.cleaned)
+activated.micros %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+DimPlot(activated.micros)
+```
+
+```{r}
+a <- lapply(levels(activated.micros), function(x) FindMarkers(activated.micros, ident.1 = x, logfc.threshold = .1, min.pct = .1) %>% rownames_to_column('gene') %>% mutate(subclust = x))
+names(a) <- paste0("subclust",levels(activated.micros))
+activated.micros@misc$subclust.markers <- a
+```
+
+```{r}
+for (markers in activated.micros@misc$subclust.markers) {
+  print(markers)
+}
+```
+
+```{r}
+tcells.cleaned <- subset(apoe.cko.tau.cleaned, cell_type == "T Cells")
+tcells.cleaned %<>% SCTransform(vars.to.regress = c("percent.mito", "percent.astro", "sex", "batch"))
+tcells.cleaned %<>% RunPCA()
+tcells.cleaned %<>% FindNeighbors(dims = 1:30) 
+tcells.cleaned %<>% FindClusters(res = 1)
+tcells.cleaned$subclust <- Idents(tcells.cleaned)
+tcells.cleaned %<>% RunUMAP(dims = 1:30)
+```
+```{r}
+tcells.cleaned %>% DimPlot(label = T)
+tcells.cleaned %>% DimPlot(group.by = "sex")
+tcells.cleaned %>% DimPlot(group.by = "sample")
+tcells.cleaned %>% DimPlot(group.by = "aav")
+```
+
+```{r}
+VlnPlot(tcells.cleaned, features = c("Ifit1", "Isg15", "Phf11c", "Ifi209", "Ifit3", "Irf7", "Stat1", "Bst2", "Cd8a", "Ifng"), combine = F, pt.size = 0)
+```
+
+```{r}
+pdf(file = "tcell_marker.violins.pdf", width = 8, height = 15)
+VlnPlot(apoe.cko.tau.cleaned, group.by = "cell_type", features = c("Stat1", "Bst2", "Cd8a", "Cd3e", "Ifng", "Cd4"), ncol = 2, pt.size = 0) + theme(legend.position = "none")
+dev.off()
+```
+
+```{r}
+a <- FindMarkers(tcells.cleaned, group.by = "aav", ident.1 = "P301L", logfc.threshold = .1, min.pct = .05)
+a
+```
+
+
+```{r}
+write.csv("tcell_markers.csv", x = apoe.cko.tau.cleaned@misc$cell_type.markers[6], quote = F, row.names = F)
+```
+

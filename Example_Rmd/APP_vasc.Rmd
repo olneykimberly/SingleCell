@@ -1,0 +1,2626 @@
+---
+title: "Cerebral Vasculature respose to Amyloidosis Single Cell Analysis"
+author: "Tanner Jensen"
+date: "11/13/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(Seurat)
+require(sctransform)
+require(gridExtra)
+require(magrittr)
+require(ggplot2)
+require(tidyr)
+require(dplyr)
+require(monocle)
+require(pheatmap)
+require(tibble)
+require(scales)
+require(readr)
+require(aroma.light)
+```
+
+# Mural/Vasculature Single Cell Analysis
+Based on findings in earlier paper, Clu knockout mice expressing APP saw a unique amyloid pathology where plaques moved from brain parenmycha (where they are 
+usually found) to within blood vessels. Using an cell extraction method to enrich for vasculature and mural cells, we investigate using single cell RNA sequencing, 
+the transcriptional states of these cells across differing Clu and APP genotypes. Mural/Vasculature tissue was collected from 16 mice and pooled into 8 samples. Two
+samples each had the following genotypes (APP/Clu): WT/WT, WT/KO, APP/WT, APP/KO. We expect to see transcriptionally different vasculature 
+cells in the APP_plus/Clu_KO mice as this genotype was the only one associated with Amyloid plaque localization to vasculature. APP_WT mice do not have any amyloid 
+plaques. APP_plus mice with WT Clu should have plaques but located in the parenmycha not the vasculature. 
+
+## Read 10x Data and create Seurat Object
+```{r readData Batch1}
+app.vasc.counts.batch1 = Read10X("filtered_MM_analysis/APP_Vasc_Batch1/outs/filtered_feature_bc_matrix/")
+ncol(app.vasc.counts.batch1)
+app.vasc.batch1 <- CreateSeuratObject(counts = app.vasc.counts.batch1, min.cells = 10, min.features = 200, project = "APP_VASC_B1")
+ncol(app.vasc.batch1)
+```
+
+```{r}
+app.vasc.counts.batch2 = Read10X("filtered_MM_analysis/APP_Vasc_Batch2/outs/filtered_feature_bc_matrix/")
+ncol(app.vasc.counts.batch2)
+app.vasc.batch2 <- CreateSeuratObject(counts = app.vasc.counts.batch2, min.cells = 10, min.features = 200, project = "APP_VASC_B2")
+ncol(app.vasc.batch2)
+```
+
+
+## Extract Sample Name From BarCode and Label Genotype
+
+Sample name is the last numeric character of the cell barcode name stored in colnames.
+Genotypes are determined from sample names based on mapping that was sent in an Email from Ola:
+WT/WT1 - Lane 2
+APP/WT1 - Lane 4
+WT/WT2 - Lane 5
+APP/WT2 - Lane 8 ( For project Davis-US-Mayo-2-premade-libseq-2-lane-WOBI-NVUS2018092827)
+
+Ignoring Clu genotypes: 
+WT1 - Lane 2
+APP1 - Lane 4
+WT2 - Lane 5
+APP2 - Lane 8 
+
+Lane 2 and Lane 4 = Batch1
+Lane 5 and Lane 8 = Batch2
+
+```{r}
+sample_regex = "^[ACGT]+-([1-8])$"
+samples <- ifelse(sub(pattern = sample_regex, replacement = "\\1", x = colnames(app.vasc.batch1)) == "1", yes = "L2", no = "L4")
+app.vasc.batch1$sample <- samples
+Idents(app.vasc.batch1) <- samples
+table(app.vasc.batch1$sample)
+
+samples <- ifelse(sub(pattern = sample_regex, replacement = "\\1", x = colnames(app.vasc.batch2)) == "1", yes = "L5", no = "L8")
+app.vasc.batch2$sample <- samples
+Idents(app.vasc.batch2) <- samples
+table(app.vasc.batch2$sample)
+
+genotype_list <- list(
+  L2 = "WT",
+  L4 = "APP",
+  L5 = "WT",
+  L8 = "APP"
+)
+app.vasc.batch1$app <- factor(sapply(app.vasc.batch1$sample, function(x) genotype_list[[x]]), levels = c("WT", "APP"))
+app.vasc.batch2$app <- factor(sapply(app.vasc.batch2$sample, function(x) genotype_list[[x]]), levels = c("WT", "APP"))
+table(app.vasc.batch1$app)
+table(app.vasc.batch2$app)
+app.vasc.batch1$batch <- "batch1"
+app.vasc.batch2$batch <- "batch2"
+```
+
+## Calc QC metrics
+```{r violinPlots}
+app.vasc.batch1$percent.mito <- PercentageFeatureSet(app.vasc.batch1, pattern = "^mt-")
+app.vasc.batch1$percent.ribo <- PercentageFeatureSet(app.vasc.batch1, pattern = "^Rpl")
+app.vasc.batch1$percent.ribo.mito <- PercentageFeatureSet(app.vasc.batch1, pattern = "^Rpl|^mt-")
+
+app.vasc.batch2$percent.mito <- PercentageFeatureSet(app.vasc.batch2, pattern = "^mt-")
+app.vasc.batch2$percent.ribo <- PercentageFeatureSet(app.vasc.batch2, pattern = "^Rpl")
+app.vasc.batch2$percent.ribo.mito <- PercentageFeatureSet(app.vasc.batch2, pattern = "^Rpl|^mt-")
+
+VlnPlot(object = app.vasc.batch1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size = .1)
+VlnPlot(object = app.vasc.batch1, features = c("percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = .1)
+
+VlnPlot(object = app.vasc.batch2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size = .1)
+VlnPlot(object = app.vasc.batch2, features = c("percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = .1)
+```
+
+#### nUMI vs percent.mito and nGene
+Plotting nUMI vs percent.mito and nGene. Those with few UMIs and high mito content are obviously
+not what we're looking for. Cutoff remains the same as above, though.
+```{r umiVsMitoGene}
+FeatureScatter(object = app.vasc.batch1, feature1 = "nCount_RNA", feature2 = "percent.mito")
+FeatureScatter(object = app.vasc.batch1, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(object = app.vasc.batch2, feature1 = "nCount_RNA", feature2 = "percent.mito")
+FeatureScatter(object = app.vasc.batch2, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+We see an abberant population of cells mostly coming L2 where the slope between nUMI and nGene is not as steep (relatively more UMIs coming from the same gene). Spoiler alert: this is due to the choroid plexus contamination of that sample. Choroid cells express massive amount of Ttr which is accounting for increased nUMIs all coming from the same gene. 
+
+#### Include cells with < 0.2 mitochondrial reads, nUMI < 10k
+Keeping the percent.mito cutoff relatively high because we will filter mito more when cleaning each individual cluster
+```{r selectCells}
+app.vasc.batch1 %<>% subset(percent.mito < 20 & nCount_RNA < 10000)
+app.vasc.batch2 %<>% subset(percent.mito < 20 & nCount_RNA < 10000)
+VlnPlot(object = app.vasc.batch1, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size = .1)
+VlnPlot(object = app.vasc.batch1, features = c("percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = .1)
+VlnPlot(object = app.vasc.batch2, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size = .1)
+VlnPlot(object = app.vasc.batch2, features = c("percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = .1)
+```
+
+
+## Try to Integrate Mural Cells
+```{r}
+app.vasc.list <- list(app.vasc.batch1, app.vasc.batch2)
+app.vasc.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito"))
+app.vasc.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito"))
+```
+
+## Find Integration Anchors
+```{r}
+app.vasc.anchors <- FindIntegrationAnchors(app.vasc.list, dims = 1:30)
+```
+
+```{r}
+app.vasc.integrated <- IntegrateData(app.vasc.anchors, dims = 1:30)
+```
+
+```{r}
+DefaultAssay(object = app.vasc.integrated) <- "integrated"
+
+app.vasc.integrated %<>% ScaleData()
+app.vasc.integrated %<>% RunPCA()
+```
+
+#### Identify top genes and their individual contributions in the top two principal components. 
+```{r vizPCA}
+VizDimLoadings(object = app.vasc.integrated, dims = 1:2)
+```
+
+#### JackStraw (Q-Q) Plots
+Generate Q-Q plots to determine which PCs have p-values that diverge from normal. Include those in 
+future analyses. Will include PC1-PC15.
+```{r jackStrawPlot, eval=FALSE}
+ElbowPlot(object = app.vasc.integrated)
+```
+
+```{r findClusters}
+app.vasc.integrated %<>% FindNeighbors(dims.use = 1:30)
+app.vasc.integrated %<>% FindClusters(resolution = .6)
+```
+
+#### UMAP plots
+```{r TSNE}
+app.vasc.integrated %<>% RunUMAP(dims = 1:30, min_dist = 0.75)
+```
+
+```{r TSNEplots}
+# note that you can set do.label=T to help label individual clusters
+# app.ps1 <- SetAllIdent(object = app.ps1, id = "CellType")
+DimPlot(object = app.vasc.integrated, do.return = FALSE, pt.size = 0.1, label = TRUE)
+DimPlot(object = app.vasc.integrated, do.return = FALSE, pt.size = 0.1, label = FALSE, group.by = "batch")
+DimPlot(object = app.vasc.integrated, do.return = FALSE, pt.size = 0.1, label = FALSE, group.by = "app")
+```
+
+
+```{r}
+FeaturePlot(app.vasc.integrated, features = c("Cldn5"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Rgs5", "Acta2"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Meg3", "Slc1a2"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Hbb-bs", "Ccl5"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Cspg5", "Clu"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Ctss", "Nov"), pt.size = .1)
+FeaturePlot(app.vasc.integrated, features = c("Ttr"), pt.size = .1)
+```
+
+```{r}
+VlnPlot(app.vasc.integrated, features = c("Ttr"), pt.size = .1, assay = "RNA", log = T)
+VlnPlot(app.vasc.integrated, features = c("Ttr"), pt.size = .1, group.by = "sample", assay = "RNA", log = T)
+```
+
+We see that Ttr contamination will be a major problem -- all cells from mouse L1 and L2 have modest levels of Ttr RNA, this will bias all downstream genotype comparisons. This is a result of these two samples having choroid plexus contamination in the dissection. Ttr expression is BLAZING in Choroid cells -- these cells are probably more likely to rupture in the microfluidics as well so the solution from this run was saturated with Ttr mRNA causing there to be ambient levels in all cells from L1 and L2. To fix this problem we will determine markers for the Choroid plexus cell population (clusters 13 and 8), then based on expression of those markers in the whole data set filter out cells with high choroid markers. Then we will take the raw count matrix from the remaning cells, and subset it to remove Ttr and other highly expressed choroid genes that could be polluting the samples. Then we will rerun normalization/integration. 
+
+## Find Choroid Markers
+```{r}
+app.vasc.integrated$percent.choroid <- Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")[c("Ttr", "Enpp2"), ]) /
+                                        Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")) * 100
+app.vasc.integrated$percent.rbc <- Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")[c("Hbb-bs", "Hba-a1", "Hbb-bt", "Hba-a2"), ]) /
+                                        Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")) * 100
+```
+
+```{r}
+VlnPlot(app.vasc.integrated, features = c("percent.choroid"), pt.size = .1, y.max = 10) + geom_hline(yintercept = 3, color = "red")
+VlnPlot(app.vasc.integrated, features = c("percent.rbc"), pt.size = .1, y.max = 10) + geom_hline(yintercept = 1, color = "red")
+```
+
+## Filter Out Choroid Polluted Cells
+
+```{r}
+app.vasc.integrated %<>% SubsetData(ident.remove = 11)
+app.vasc.integrated %<>% subset(percent.choroid < 3 & percent.rbc < 1)
+```
+
+### Remove Choroid Markers from Raw Counts
+
+We remove choroid markers and then go through the standard Seurat pipeline once again
+We save the expression of Ttr and store it as a meta.variable in the Seurat object so that when we scale the data we can regress out the expression of Ttr, hopefully controlling for other choroid genes that can be contaminating the samples
+```{r}
+app.vasc.counts = app.vasc.integrated@assays$RNA
+choroid_markers <- which(rownames(app.vasc.counts) %in% c("Ttr", "Enpp2"))
+app.vasc.counts <- app.vasc.counts[-choroid_markers, ]
+app.vasc <- CreateSeuratObject(counts = app.vasc.counts, min.cells = 10, min.features = 200, project = "APP_VASC", meta.data = app.vasc.integrated@meta.data)
+Idents(app.vasc) <- app.vasc$sample
+```
+
+
+## Calc QC Metrics
+```{r violinPlots}
+VlnPlot(object = app.vasc, features = c("nFeature_RNA", "nCount_RNA", "percent.mito"), pt.size = .1)
+VlnPlot(object = app.vasc, features = c("percent.mito", "percent.ribo", "percent.ribo.mito"), pt.size = .1)
+VlnPlot(object = app.vasc, features = c("percent.choroid", "percent.rbc"), pt.size = .1)
+```
+
+
+#### nUMI vs percent.mito and nGene
+Plotting nUMI vs percent.mito and nGene. Those with few UMIs and high mito content are obviously
+not what we're looking for. Cutoff remains the same as above, though.
+```{r umiVsMitoGene}
+FeatureScatter(object = app.vasc, feature1 = "nCount_RNA", feature2 = "percent.mito")
+FeatureScatter(object = app.vasc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+Now that choroid cells and markers have been removed. The nGene-nUMI scatter looks a lot cleaner. We have a more homogeneous population.
+
+## Time to Integrate
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+app.vasc.list <- SplitObject (object = app.vasc, split.by = "batch")
+app.vasc.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.choroid", "percent.mito"))
+app.vasc.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.choroid", "percent.mito"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+app.vasc.anchors <- FindIntegrationAnchors(app.vasc.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+app.vasc.integrated <- IntegrateData(app.vasc.anchors, dims = 1:30)
+```
+
+### Set default assay to the Integrated Data and Scale Data
+
+After integration we can scale data to control for additional variables by regressing them out and using pearson residuals from this regression as scaled expression values. Here we can also regress out the expression of Ttr that we saved earlier in order to remove the choroid plexus bias from the L1 and L2 samples. Here we just regress out percent.mito because I believe after already removing Ttr the rest of the Ttr contamination shouldn't be that influential. 
+
+```{r}
+DefaultAssay(object = app.vasc.integrated) <- "integrated"
+
+app.vasc.integrated %<>% ScaleData()
+app.vasc.integrated %<>% RunPCA()
+```
+
+#### Identify top genes and their individual contributions in the top two principal components. 
+```{r vizPCA}
+# Examine and visualize PCA results a few different ways
+VizDimLoadings(object = app.vasc.integrated, dims = 1:2)
+```
+
+#### ELbow plots
+```{r jackStrawPlot, eval=FALSE}
+ElbowPlot(object = app.vasc.integrated)
+```
+
+### Cluster newly cleaned data
+```{r findClusters}
+app.vasc.integrated %<>% FindNeighbors(dims.use = 1:30)
+app.vasc.integrated %<>% FindClusters(resolution = .6)
+```
+
+#### UMAP plots
+```{r TSNE}
+app.vasc.integrated %<>% RunUMAP(dims = 1:30, min_dist = 0.75)
+```
+
+### Plot Data
+```{r}
+DimPlot(app.vasc.integrated, label = T)
+DimPlot(app.vasc.integrated, label = F, group.by = "app")
+```
+
+Here we see our pre-cleaned UMAP plot. We see a large cluster of endothelial cells, and a pretty large cluster of mural cells that are zonated from true SMC (cluster 9) to pericytes (cluster 8). We see smaller peripheral clusters of Neurons (11) Glia--either astros or oligos (13), OPC (10), peripheral immune cells (12), RBC--potentially stuck to endo cells--(14), and cluster 15 is another peripheral immune cell type probably. We note that there is a cluster in the UMAP of what is probably microglia, but they do not cluster seperately with Louvain clustering even at extremely high resolutions. Might have to manually force clustering later so we can get a unique microglia population. 
+
+```{r}
+FeaturePlot(app.vasc.integrated, features = c("Cldn5", "Pecam1", "Tek", "Itm2a"))
+FeaturePlot(app.vasc.integrated, features = c("Rgs5", "Vtn", "Acta2", "Myh11"))
+FeaturePlot(app.vasc.integrated, features = c("Cspg5", "Olig1", "C1qa", "Ctss"))
+FeaturePlot(app.vasc.integrated, features = c("Nkg7", "Ccl5", "Meg3", "Snhg11"))
+FeaturePlot(app.vasc.integrated, features = c("Slc1a2", "Gja1", "Nov", "Dcn"))
+```
+
+Plotting known markers for each of the cell types we identified helped us label which clusters were what. We see here in the pre-cleaned data that there is significant endothelial markers showing up outside big endo cluster. This is probably because we have such a high doublet rate. We will go through a subclustering round of cleaning to hopefully remove these doublets and other artifacts. 
+
+## Look at Cluster enrichments for specific genotypes
+
+We start by making a sample level data frame that will help us plot enrichment of different clusters. We will normalize counts in each cluster by looking at the fraction of cells from each sample present in that cluster. Plotting them colored/shaped by genotype will allow us to visualize specific enrichments.
+
+```{r}
+samples <- unique(app.vasc.cleaned.integrated$sample)
+app <- c("WT", "APP", "WT", "APP")
+batch <- c(rep("batch1", 2), rep("batch2", 2))
+
+sample.df <- data.frame(ID=samples, APP=app, BATCH=batch)
+app.vasc.integrated$sample <- factor(app.vasc.integrated$sample, levels = c("L2", "L4", "L5", "L8"))
+
+clusterGenoEnrichPlot <- function(object, cluster_name = "Clust", normalize_object = NULL, thresh = 0.05) {
+  object$sample <- factor(object$sample, levels = c("L2", "L4", "L5", "L8"))
+  if(is.null(normalize_object)) normalize_object <- object
+  tmp.sample.df <- sample.df
+  t_statistic <- NULL
+  t.pvalues <- NULL
+  for (i in levels(object)) {
+    col_name = paste0(cluster_name, i, ".cell_fractions")
+    tmp.sample.df[[col_name]] = table(object$sample[Idents(object) == i]) / table(normalize_object$sample) * 100
+    t.tmp <- t.test(tmp.sample.df[[col_name]] ~ APP, data = tmp.sample.df)
+    t_statistic <- c(t_statistic, t.tmp$statistic)
+    t.pvalues <- c(t.pvalues, t.tmp$p.value)
+  }
+  enrichment.df <- data.frame(t(as.matrix(data.frame(aggregate(. ~ APP, tmp.sample.df[-c(1,3)], mean), row.names = 1))))
+  enrichment.df$Cluster <- factor(gsub(pattern = paste0(cluster_name, "(.*)\\.cell_fractions"), replacement = "\\1", rownames(enrichment.df)), 
+                                  levels = 0:length(levels(object)))
+  enrichment.df$t_statistic <- t_statistic
+  enrichment.df$p_val <- t.pvalues
+  enrichment.df$p_val_adj <- p.adjust(enrichment.df$p_val, method = "BH")
+  
+  print(enrichment.df %>% rownames_to_column("Clust") %>% filter(p_val < thresh))
+  enrichment.df.tidy <- gather(enrichment.df, APP, cell_fraction, -Cluster, -t_statistic, -p_val, -p_val_adj)
+  print(ggplot(enrichment.df.tidy, aes(x = Cluster, y = cell_fraction, fill = APP)) + geom_bar(stat = "identity", position = "dodge"))
+  
+  sample.df.clusters <- gather(tmp.sample.df, Cluster, cell_fraction, -ID, -APP, -BATCH)
+  sample.df.clusters$Cluster <- factor(gsub(pattern = paste0(cluster_name, "(.*)\\.cell_fractions"), replacement = "\\1", sample.df.clusters$Cluster), levels = levels(object))
+  print(ggplot(sample.df.clusters, aes(x = Cluster, y = cell_fraction, color = APP, shape = BATCH)) + geom_point(size = 3))
+}
+
+#clusterGenoEnrichPlot(app.vasc.integrated, cluster_name = "global", thresh = 0.1)
+```
+
+We see Cluster0, cluster3, cluster4, cluster5, cluster9, and cluster12 have significant genotype differences in the porportion of cells found in those clusters. Most of these (with the exception of cluster 12) would not hold up to hypothesis correction. We are severely limited by having an n=2 for each group. We are fighting an uphill battle for statistical power. However, these *trending* significances show us that there are genotype differences in the data. Particularly in endothelial cells where we have the largest number of cells and the most power. We see there is a cluster particularly enriched for mice without amyloid. And a couple of endothelial clusters clearly enriched for amyloid burdened mice. 
+
+Grouping genotypes together (combining APP/KO and APP/WT), we can use a welchs t test to test enrichment with more power. In which we see of interest both mural cells are significantly enriched for mice without amyloid. This could be because the amyloid casing in the vascular matrix prevents the smooth muscle cells from this sample to be released into the cell suspension. 
+
+
+Visualizing enrichments across all the different groups we have gets difficults. These plots are a little messy and there's probably a better way of visualizing this, but from these messy plots we can still see some interesting patterns. Particularly there are specific clusters that appear to be enriched for specific genotypes. It appears that amyloid has a bigger effect than clu. And thankfully, there appears to be no batch effect in clustering as samples from each batch appear to be equally represented across all clusters. 
+
+We also see in the first plot when we plot by sample ID and genotype that L1 and L2 (choroid contaminated samples) do not appear to be influencing clustering. For the most part, cells are more closely clustered based on genotype rather even across different batches rather than by other factors.
+
+## Find Cell type Markers
+
+In order to clean the data to remove doublets we need to know markers for each different cluster. Once we have a good set of differentially expressed markers for each cluster we can characterize cells by the percentage of UMIs coming from these markers. This will allow us to filter out cells that have high values of markers from mulitple clusters (doublets). 
+
+```{r}
+cluster_markers <- list()
+cluster_markers[[1]] = FindMarkers(app.vasc.integrated, ident.1 = 0:7, min.pct = 0.25, only.pos = T) ## Find Endo markers
+for (i in 8:14) {
+  cluster_markers[[i]] = FindMarkers(app.vasc.integrated, ident.1 = i, min.pct = .25, only.pos = T)
+}
+```
+
+```{r}
+for (markers in cluster_markers) {
+  print(head(markers, 40))
+}
+```
+
+```{r}
+avg_expression <- apply(GetAssayData(app.vasc.integrated, assay = "SCT")[,Idents(app.vasc.integrated) == 10], 1, mean)
+head(sort(avg_expression, decreasing = T), 60)
+```
+
+Looking at the markers we can refine our labeling of the cell clusters. We see cluster 0-7 are endothelial. Cluster 8 is pericytes, cluster 9 is smooth muscle, cluster 10 probably is OPC, cluster 11 Neurons, cluster 12 immune (not sure what to make of increase in Ribosomal protein transcrips??), cluster 13 is probably astrocyte, cluster 14 RBC, and cluster 15 is the fibroblast cluster!!
+
+```{r}
+cell.types <- list( 
+  "0" = "Endothelial",
+  "1" = "Endothelial",
+  "2" = "Endothelial",
+  "3" = "Endothelial",
+  "4" = "Endothelial",
+  "5" = "Endothelial",
+  "6" = "Endothelial",
+  "7" = "Endothelial",
+  "8" = "Pericyte",
+  "9" = "SMC",
+  "10" = "OPC",
+  "11" = "Neuron",
+  "12" = "PBMC",
+  "13" = "Microglia",
+  "14" = "Fibroblast-like"
+)
+app.vasc.integrated$cell_type <- factor(sapply(Idents(app.vasc.integrated), function(x) cell.types[[x]]), levels = unique(as.character(cell.types)))
+
+DimPlot(object = app.vasc.integrated, do.return = FALSE, pt.size = 0.1, label = TRUE, group.by = "cell_type", repel = T)
+```
+
+Plotting UMAP colored by Cell Type rather than cluster. We see most cells are endothelial. With smaller clusters of various cell types surrounding it. 
+
+```{r}
+cell_type.markers <- list(
+  "endo" = c("Cldn5", "Itm2a", "Klf2", "Flt1"),
+  "peri" = c("Rgs5", "Vtn", "Higd1b", "Atp1a2"),
+  "smc" = c("Acta2", "Tpm2", "Cebpb", "Tagln"),
+  "opc" = c("Cspg5", "Tnr", "Olig1", "Pdgfra"),
+  "neuro" = c("Meg3", "Gad1", "Snap25", "Gria2"),
+  "pbmc" = c("Ccl5", "Cd52", "Nkg7", "Ms4a4b"),
+  "micro" = c("Ctss", "C1qb", "Trem2", "Hexb"),
+  "astro" = c("Slc1a3", "Clu", "Aldoc", "Gja1"),
+  "fibro" = c("Nov", "Lum", "Dcn", "Efemp1"),
+  "nsc" = c("Sox11", "Sox4", "Pbk", "Prc1"),
+  "ependyma" = c("Chchd10", "Tmem212", "Ccdc153", "Fam183b")
+)
+```
+
+```{r}
+for (cell_type in names(cell_type.markers)) {
+  print(VlnPlot(app.vasc.integrated, features = cell_type.markers[[cell_type]], pt.size = 0, ncol = 2, assay = "SCT") + ggtitle(cell_type))
+}
+```
+
+```{r}
+for (cell_type in names(cell_type.markers)) {
+  col.name = paste0("percent.",cell_type)
+  app.vasc.integrated[[col.name]] <- Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")[cell_type.markers[[cell_type]], ]) /
+    Matrix::colSums(GetAssayData(app.vasc.integrated, assay = "RNA")) * 100
+}
+```
+
+
+
+```{r ClusterVlnPlot}
+VlnPlot(object = app.vasc.integrated, features = c("percent.endo"), pt.size = .01, split.by = "app") 
+VlnPlot(object = app.vasc.integrated, features = c("percent.peri"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.smc"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.opc"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.neuro"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.pbmc"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.micro"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.fibro"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.astro"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.nsc"), pt.size = .01) 
+VlnPlot(object = app.vasc.integrated, features = c("percent.ependyma"), pt.size = .01) 
+```
+
+
+# SubCluster Mural Cells
+```{r murals}
+murals <- subset(app.vasc.integrated, idents = c(8,9))
+```
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+murals.list <- SplitObject(object = murals, split.by = "batch")
+murals.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+murals.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+murals.anchors <- FindIntegrationAnchors(murals.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+murals.integrated <- IntegrateData(murals.anchors, dims = 1:30)
+```
+```{r runPCA murals}
+murals.integrated %<>% ScaleData()
+murals.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_murals}
+murals.integrated %<>% FindNeighbors(dims.use = 1:30)
+murals.integrated %<>% FindClusters(resolution = .6)
+murals.integrated %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+murals.integrated %<>% BuildClusterTree(dims = 1:30)
+PlotClusterTree(murals.integrated)
+```
+
+```{r UMAP_murals}
+DimPlot(murals.integrated, label = T, pt.size = 0.15)
+DimPlot(murals.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(murals.integrated, pt.size = 0.15, group.by = "cell_type")
+FeaturePlot(murals.integrated, pt.size = .1, features = c("percent.peri", "percent.smc", "percent.endo", "percent.opc"))
+```
+
+```{r clusterGenoEnrich_Murals}
+clusterGenoEnrichPlot(murals.integrated, cluster_name = "mural", thresh = .1)
+clusterGenoEnrichPlot(murals.integrated, cluster_name = "mural", normalize_object = app.vasc.integrated, thresh = .1)
+```
+
+```{r}
+murals.subcluster.markers <- list()
+for (i in levels(murals.integrated)) {
+  name <- paste0('mural',i)
+  murals.subcluster.markers[[name]] <- FindMarkers(murals.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in murals.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+
+
+```{r}
+VlnPlot(murals.integrated, features = c("percent.peri", "percent.smc", "percent.endo", "percent.micro", "percent.opc"), pt.size = 0, combine = F)
+VlnPlot(murals.integrated, features = c("percent.mito", "percent.ribo", "nFeature_RNA"), pt.size = 0, combine = F)
+```
+
+```{r}
+murals.integrated %<>% SubsetData(ident.remove = c(1,3,4,6,8))
+VlnPlot(murals.integrated, features = c("percent.peri", "percent.smc", "percent.endo"), pt.size = 0, combine = T)
+VlnPlot(murals.integrated, features = c("nFeature_RNA", "percent.mito", "percent.micro"), pt.size = 0)
+murals.integrated %<>% subset(percent.endo < 0.5 & percent.mito < 10 & nFeature_RNA < 1500)
+VlnPlot(murals.integrated, features = c("percent.peri", "percent.smc", "percent.endo"), pt.size = 0, combine = T)
+VlnPlot(murals.integrated, features = c("nFeature_RNA", "percent.mito", "percent.rbc"), pt.size = 0)
+```
+
+```{r}
+mural_celltype_list <- list("0" = "SMC",
+                            "2" = "SMC",
+                            "5" = "Peri",
+                            "7" = "Peri")
+cleaned_cells <- colnames(murals.integrated)
+cleaned_celltypes <- sapply(Idents(murals.integrated), function(x) mural_celltype_list[[x]])
+table(cleaned_celltypes)
+```
+
+
+# Subcluster Endothelial Cells
+```{r}
+endos <- SubsetData(app.vasc.integrated, ident.use = 0:7)
+```
+
+## First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+endos.list <- SplitObject(object = endos, split.by = "batch")
+endos.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+endos.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+endos.anchors <- FindIntegrationAnchors(endos.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+endos.integrated <- IntegrateData(endos.anchors, dims = 1:30)
+```
+```{r runPCA endos}
+endos.integrated %<>% ScaleData()
+endos.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+endos.integrated %<>% FindNeighbors(dims.use = 1:30)
+endos.integrated %<>% FindClusters(resolution = .6)
+endos.integrated %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(endos.integrated, label = T, pt.size = 0.15)
+DimPlot(endos.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(endos.integrated, pt.size = 0.15, group.by = "batch")
+DimPlot(endos.integrated, pt.size = 0.15, split.by = "sample", group.by = "app")
+```
+```{r}
+save.image("app.vasc.RData")
+```
+
+```{r}
+endo.subcluster.markers <- data.frame()
+for (i in levels(endos.integrated)) {
+  endo.subcluster.markers <- rbind(endo.subcluster.markers, 
+                                   FindMarkers(endos.integrated, ident.1 = i, 
+                                               max.cells.per.ident = 2000, logfc.threshold = .1, min.pct = .25) %>%
+                                               rownames_to_column('gene') %>% mutate(cluster = i))
+}
+```
+```{r}
+endo.subcluster.markers %>% group_by(cluster) %>% top_n(10, wt = avg_logFC)
+```
+
+```{r}
+VlnPlot(endos.integrated, features = c("percent.endo", "percent.peri", "percent.smc", "percent.micro", "percent.opc", "percent.neuro", "percent.pbmc"), assay = "SCT", combine = F, pt.size = .1)
+VlnPlot(endos.integrated, features = c("percent.mito", "nFeature_RNA", "nCount_RNA"), assay = "SCT", combine = F, pt.size = .1)
+```
+
+```{r}
+VlnPlot(endos.integrated, features = c("Gkn3", "Bmx", "Stmn2", "Vegfc"), assay = "SCT", pt.size = 0, ncol = 2)
+VlnPlot(endos.integrated, features = c("Nr2f2", "Slc38a5"), assay = "SCT", pt.size = 0, ncol = 2)
+VlnPlot(endos.integrated, features = c("Mfsd2a"), assay = "SCT", pt.size = 0)
+VlnPlot(endos.integrated, features = c("Ifit1", "Ifit3", "Bst2", "Irf7"), assay = "SCT", pt.size = 0, ncol = 2)
+```
+
+```{r}
+endos.integrated %<>% SubsetData(ident.remove = 8)
+endos.integrated %<>% subset(percent.endo > 1 & percent.peri < 0.5 & percent.smc < 0.5)
+VlnPlot(endos.integrated, features = c("percent.endo", "nFeature_RNA", "percent.mito", "percent.peri", "percent.smc"), pt.size = .1)
+endos.integrated %<>% subset(nFeature_RNA < 1500 & percent.mito < 5)
+VlnPlot(endos.integrated, features = c("percent.endo", "nFeature_RNA", "percent.mito"))
+```
+
+### Check enrichments
+```{r}
+clusterGenoEnrichPlot(endos.integrated, cluster_name = "endo", thresh = .1)
+```
+
+```{r}
+tmp.cleaned_markers <- rep("Endo", ncol(endos.integrated))
+cleaned_cells <- c(cleaned_cells, colnames(endos.integrated))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+```
+
+
+# Subcluster and Clean OPC
+```{r}
+opc <- subset(app.vasc.integrated, cell_type == "OPC")
+opc.list <- SplitObject(object = opc, split.by = "app")
+opc.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+opc.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+opc.anchors <- FindIntegrationAnchors(opc.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+opc.integrated <- IntegrateData(opc.anchors, dims = 1:30)
+DefaultAssay(opc.integrated) <- "integrated"
+```
+```{r runPCA opc}
+opc.integrated %<>% ScaleData()
+opc.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+opc.integrated %<>% FindNeighbors(dims.use = 1:30)
+opc.integrated %<>% FindClusters(resolution = .6)
+opc.integrated %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(opc.integrated, label = T, pt.size = 0.15)
+DimPlot(opc.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(opc.integrated, pt.size = 0.15, group.by = "batch")
+```
+
+```{r}
+FindMarkers(opc.integrated, ident.1 = 0, ident.2 = 2, only.pos = T, assay = "SCT")
+```
+
+```{r}
+FeaturePlot(opc.integrated, features = c("percent.opc", "percent.astro", "percent.endo", "percent.nsc"))
+```
+
+```{r}
+clusterGenoEnrichPlot(opc.integrated, cluster_name = "opc")
+clusterGenoEnrichPlot(opc.integrated, cluster_name = "opc", normalize_object = app.vasc.integrated)
+```
+
+```{r}
+opc.subcluster.markers <- list()
+for (i in levels(opc.integrated)) {
+  name <- paste0('opc',i)
+  opc.subcluster.markers[[name]] <- FindMarkers(opc.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in opc.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(opc.integrated, features = c("percent.endo", "percent.micro", "percent.opc", "percent.astro", "percent.peri", "percent.smc", "percent.nsc"), pt.size = 0, combine = F)
+VlnPlot(opc.integrated, features = c("percent.mito", "percent.ribo", "nCount_RNA", "nFeature_RNA"), pt.size = .1, combine = F)
+```
+
+```{r}
+opc.integrated %<>% SubsetData(ident.remove = c(1,3,5,6))
+VlnPlot(opc.integrated, features = c("percent.astro", "percent.opc", "percent.nsc"), pt.size = 0)
+VlnPlot(opc.integrated, features = c("percent.endo", "percent.mito", "nFeature_RNA"), pt.size = 0)
+opc.integrated %<>% subset(percent.endo < .5 & percent.mito < 10)
+```
+
+```{r}
+opc_celltype_list <- list(
+  "0" = "OPC",
+  "2" = "OPC",
+  "4" = "Astro"
+)
+tmp.cleaned_markers <- sapply(Idents(opc.integrated), function(x) opc_celltype_list[[x]])
+cleaned_cells <- c(cleaned_cells, colnames(opc.integrated))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+
+```
+
+# Subcluster and Clean Neurons
+```{r}
+neuro <- subset(app.vasc.integrated, cell_type == "Neuron")
+neuro.list <- SplitObject(object = neuro, split.by = "batch")
+neuro.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+neuro.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+neuro.anchors <- FindIntegrationAnchors(neuro.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+neuro.integrated <- IntegrateData(neuro.anchors, dims = 1:30)
+DefaultAssay(neuro.integrated) <- "integrated"
+```
+```{r runPCA neuro}
+neuro.integrated %<>% ScaleData()
+neuro.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+neuro.integrated %<>% FindNeighbors(dims.use = 1:30)
+neuro.integrated %<>% FindClusters(resolution = .6)
+neuro.integrated %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(neuro.integrated, label = T, pt.size = 0.15)
+DimPlot(neuro.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(neuro.integrated, pt.size = 0.15, group.by = "batch")
+```
+
+```{r}
+FeaturePlot(neuro.integrated, features = c("percent.neuro", "percent.nsc", "percent.endo", "percent.micro"))
+
+```
+
+```{r}
+clusterGenoEnrichPlot(neuro.integrated, cluster_name = "neuro")
+clusterGenoEnrichPlot(neuro.integrated, cluster_name = "neuro", normalize_object = app.vasc.integrated)
+```
+
+```{r}
+neuro.subcluster.markers <- list()
+for (i in levels(neuro.integrated)) {
+  name <- paste0('neuro',i)
+  neuro.subcluster.markers[[name]] <- FindMarkers(neuro.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in neuro.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(neuro.integrated, features = c("percent.endo", "percent.micro", "percent.neuro", "percent.astro", "percent.nsc"), pt.size = 0, combine = F)
+VlnPlot(neuro.integrated, features = c("percent.mito", "percent.ribo", "nCount_RNA", "nFeature_RNA"), pt.size = 0.1, combine = F)
+```
+
+```{r}
+neuro.integrated %<>% SubsetData(ident.remove = c(0,4))
+VlnPlot(neuro.integrated, features = c("percent.neuro", "percent.micro", "percent.endo"), pt.size = 0)
+neuro.integrated %<>% subset(percent.endo < .5 & percent.mito < 10)
+VlnPlot(neuro.integrated, features = c("percent.neuro", "percent.micro", "percent.endo"), pt.size = 0)
+VlnPlot(neuro.integrated, features = c("percent.nsc", "percent.astro", "percent.mito"))
+```
+
+```{r}
+neuro_celltype_list <- list(
+  "1" = "Neuro",
+  "2" = "Neuro",
+  "3" = "Neuro",
+  "5" = "aNSC",
+  "6" = "aNSC"
+)
+tmp.cleaned_markers <- sapply(Idents(neuro.integrated), function(x) neuro_celltype_list[[x]])
+cleaned_cells <- c(cleaned_cells, colnames(neuro.integrated))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+```
+
+# SubCluster ImmuneCells
+
+If we're going to see an amyloid effect -- Immune cells should give us the best bet. We know how reactive immune cells can be to the presence of amyloid as seen in Jonathon's APP/PS1 paper. Let's see if we can recapitulate the activated micro phenotype in this data. Or find a signature from other peripheral immune cells. 
+
+```{r}
+immune <- subset(app.vasc.integrated, cell_type == "PBMC")
+immune.list <- SplitObject(object = immune, split.by = "batch")
+immune.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+immune.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+### Then Find Integartion Anchors
+```{r}
+immune.anchors <- FindIntegrationAnchors(immune.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+immune.integrated <- IntegrateData(immune.anchors, dims = 1:30)
+DefaultAssay(immune.integrated) <- "integrated"
+```
+```{r runPCA immune}
+immune.integrated %<>% ScaleData()
+immune.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+immune.integrated %<>% FindNeighbors(dims.use = 1:30)
+immune.integrated %<>% FindClusters(resolution = .6)
+immune.integrated %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(immune.integrated, label = T, pt.size = 0.15)
+DimPlot(immune.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(immune.integrated, pt.size = 0.15, group.by = "batch")
+```
+
+```{r}
+clusterGenoEnrichPlot(immune.integrated, cluster_name = "immune")
+clusterGenoEnrichPlot(immune.integrated, cluster_name = "immune", normalize_object = app.vasc.integrated)
+```
+
+```{r}
+FeaturePlot(immune.integrated, features = c("percent.pbmc", "percent.endo"))
+FeaturePlot(immune.integrated, features = c("Lpl", "Cst7", "Ccl3", "Apoe"))
+```
+
+```{r}
+immune.subcluster.markers <- list()
+for (i in levels(immune.integrated)) {
+  name <- paste0('immune',i)
+  immune.subcluster.markers[[name]] <- FindMarkers(immune.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in immune.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(immune.integrated, features = c("percent.endo", "percent.micro", "percent.pbmc", "percent.neuro", "percent.opc", "percent.peri", "percent.smc", "percent.fibro"), pt.size = 0, combine = F)
+VlnPlot(immune.integrated, features = c("percent.mito", "percent.ribo", "nCount_RNA"), pt.size = 0.1, combine = F)
+VlnPlot(immune.integrated, features = c("Cd3e", "Cd8a", "Ifng", "Cd4"), pt.size = 0, assay = "SCT", ncol = 2)
+VlnPlot(immune.integrated, features = c("Cd79a", "Ms4a1", "H2-Ab1", "Iglc2"), pt.size = 0, assay = "SCT", ncol = 2)
+```
+
+```{r}
+immune.integrated %<>% SubsetData(ident.remove = c(1,3))
+immune.integrated %<>% subset(percent.endo < .5 & percent.mito < 5)
+VlnPlot(immune.integrated, features = c("nCount_RNA", "nFeature_RNA", "percent.mito"), pt.size = 0.1)
+VlnPlot(immune.integrated, features = c("Cd3e", "Cd79a"), pt.size = 0.1)
+```
+
+```{r}
+tmp.cleaned_markers <- ifelse(Idents(immune.integrated) == 4, yes = "B cell", no = "T cell")
+cleaned_cells <- c(cleaned_cells, colnames(immune.integrated))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+```
+
+# Subcluster and Clean micros
+```{r}
+micro <- subset(app.vasc.integrated, cell_type == "Microglia")
+micro.list <- SplitObject(object = micro, split.by = "batch")
+micro.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+micro.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+micro.anchors <- FindIntegrationAnchors(micro.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+micro.integrated <- IntegrateData(micro.anchors, dims = 1:30)
+DefaultAssay(micro.integrated) <- "integrated"
+```
+```{r runPCA micro}
+micro.integrated %<>% ScaleData()
+micro.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+micro.integrated %<>% FindNeighbors(dims.use = 1:30)
+micro.integrated %<>% FindClusters(resolution = .6)
+micro.integrated %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(micro.integrated, label = T, pt.size = 0.15)
+DimPlot(micro.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(micro.integrated, pt.size = 0.15, group.by = "batch")
+```
+
+```{r}
+FeaturePlot(micro.integrated, features = c("percent.micro", "percent.endo", "percent.astro", "percent.pbmc"))
+```
+
+```{r}
+clusterGenoEnrichPlot(micro.integrated, cluster_name = "Micro", thresh = .1)
+clusterGenoEnrichPlot(micro.integrated, cluster_name = "Micro", normalize_object = app.vasc.integrated, thresh = .1)
+```
+
+```{r}
+micro.subcluster.markers <- list()
+for (i in levels(micro.integrated)) {
+  name <- paste0('micro',i)
+  micro.subcluster.markers[[name]] <- FindMarkers(micro.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in micro.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(micro.integrated, features = c("percent.endo", "percent.micro", "percent.astro"), pt.size = 0, combine = F)
+VlnPlot(micro.integrated, features = c("percent.mito", "percent.ribo", "nCount_RNA"), pt.size = 0.1, combine = F)
+VlnPlot(micro.integrated, features = c("Ccl3", "Cst7", "Tmem119", "Apoe"), pt.size = 0, assay = "SCT", ncol = 2, split.by = "app")
+VlnPlot(micro.integrated, features = c("Cx3cr1", "Tyrobp", "Trem2", "Ctss"), pt.size = 0, assay = "SCT", ncol = 2)
+```
+
+```{r}
+micro.integrated %<>% subset(percent.endo < .5)
+micro.integrated %<>% SubsetData(ident.use = 3)
+VlnPlot(micro.integrated, features = c("percent.micro", "percent.endo"), pt.size = 0)
+VlnPlot(micro.integrated, features = c("percent.micro", "percent.opc", "percent.astro"))
+```
+
+```{r}
+tmp.cleaned_markers <- rep("Micro", ncol(micro.integrated))
+cleaned_cells <- c(cleaned_cells, colnames(micro.integrated))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+```
+
+
+# Subcluster and Clean fibroblast-like cells
+```{r}
+fibro <- subset(app.vasc.integrated, cell_type == "Fibroblast-like")
+```
+
+```{r runPCA fibro}
+fibro %<>% SCTransform(vars.to.regress = c("percent.mito", "percent.choroid", "batch"))
+fibro %<>% RunPCA()
+```
+```{r clusterAndTSNE_subcluster6}
+fibro %<>% FindNeighbors(dims.use = 1:30)
+fibro %<>% FindClusters(resolution = .6)
+fibro %<>% RunUMAP(dims = 1:30)
+```
+```{r TSNEplot_subcluster6}
+DimPlot(fibro, label = T, pt.size = 0.15)
+DimPlot(fibro, pt.size = 0.15, group.by = "app")
+DimPlot(fibro, pt.size = 0.15, group.by = "batch")
+```
+
+```{r}
+fibro.subcluster.markers <- list()
+for (i in levels(fibro)) {
+  name <- paste0('fibro',i)
+  fibro.subcluster.markers[[name]] <- FindMarkers(fibro, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in fibro.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+VlnPlot(fibro, features = c("percent.endo", "percent.fibro", "percent.rbc"), pt.size = 0, combine = F)
+VlnPlot(fibro, features = c("percent.mito", "percent.ribo", "nCount_RNA"), pt.size = 0, combine = F)
+```
+
+```{r}
+fibro %<>% subset(percent.endo < .5 & percent.mito < 10)
+VlnPlot(fibro, features = c("percent.fibro", "percent.rbc", "percent.endo"), pt.size = 0)
+VlnPlot(fibro, features = c("percent.fibro", "percent.mito", "nCount_RNA"))
+```
+
+```{r}
+tmp.cleaned_markers <- rep("Fibro", ncol(fibro))
+cleaned_cells <- c(cleaned_cells, colnames(fibro))
+cleaned_celltypes <- c(cleaned_celltypes, tmp.cleaned_markers)
+table(cleaned_celltypes)
+```
+
+```{r}
+length(cleaned_cells)
+table(cleaned_celltypes)
+```
+
+# Run Cleaned Data
+
+```{r}
+app.vasc.counts = app.vasc.integrated@assays$RNA
+app.vasc.counts.cleaned <- app.vasc.counts[, cleaned_cells]
+app.vasc.cleaned <- CreateSeuratObject(counts = app.vasc.counts.cleaned, min.cells = 10, min.features = 200, project = "APP_VASC_CLEANED", meta.data = app.vasc.integrated@meta.data[cleaned_cells, ])
+Idents(app.vasc.cleaned) <- app.vasc.cleaned$sample
+app.vasc.cleaned$cell_type <- cleaned_celltypes
+```
+
+```{r}
+VlnPlot(app.vasc.cleaned, features = c("percent.endo", "percent.peri", "percent.smc", "percent.opc", "percent.neuro", "percent.pbmc", "percent.micro",
+                                       "percent.fibro", "percent.nsc", "percent.astro"), group.by = "cell_type", pt.size = 0, combine = F)
+VlnPlot(app.vasc.cleaned, features = c("nCount_RNA", "nFeature_RNA", "percent.mito"), pt.size = .1)
+```
+
+## Time to Integrate
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+app.vasc.list <- SplitObject (object = app.vasc.cleaned, split.by = "batch")
+app.vasc.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.choroid", "percent.mito"))
+app.vasc.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.choroid", "percent.mito"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+app.vasc.anchors <- FindIntegrationAnchors(app.vasc.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+app.vasc.cleaned.integrated <- IntegrateData(app.vasc.anchors, dims = 1:30)
+```
+
+### Set default assay to the Integrated Data and Scale Data
+
+After integration we can scale data to control for additional variables by regressing them out and using pearson residuals from this regression as scaled expression values. Here we can also regress out the expression of Ttr that we saved earlier in order to remove the choroid plexus bias from the L1 and L2 samples. Here we just regress out percent.mito because I believe after already removing Ttr the rest of the Ttr contamination shouldn't be that influential. 
+
+```{r}
+DefaultAssay(object = app.vasc.cleaned.integrated) <- "integrated"
+
+app.vasc.cleaned.integrated %<>% ScaleData()
+app.vasc.cleaned.integrated %<>% RunPCA()
+```
+
+#### Identify top genes and their individual contributions in the top two principal components. 
+```{r vizPCA}
+# Examine and visualize PCA results a few different ways
+VizDimLoadings(object = app.vasc.cleaned.integrated, dims = 1:2)
+```
+
+#### ELbow plots
+```{r jackStrawPlot, eval=FALSE}
+ElbowPlot(object = app.vasc.integrated)
+```
+
+### Cluster newly cleaned data
+```{r findClusters}
+app.vasc.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+app.vasc.cleaned.integrated %<>% FindClusters(resolution = .6)
+```
+
+#### UMAP plots
+```{r TSNE}
+app.vasc.cleaned.integrated %<>% RunUMAP(dims = 1:30, min_dist = 0.75)
+```
+
+```{r}
+app.vasc.cleaned.integrated %<>% BuildClusterTree(dims = 1:50)
+PlotClusterTree(app.vasc.cleaned.integrated)
+```
+```{r}
+DimPlot(app.vasc.cleaned.integrated, label = T)
+DimPlot(app.vasc.cleaned.integrated, label = T, group.by = "cell_type")
+```
+
+
+```{r}
+pbmc.markers <- FindMarkers(app.vasc.cleaned.integrated, group.by = "cell_type", ident.1 = "PBMC", logfc.threshold = .1, assay = "SCT")
+write.table(pbmc.markers, "pbmc_markers.csv", row.names = T, col.names = T, quote = F, sep = ",")
+```
+
+```{r}
+table(Idents(app.vasc.cleaned.integrated))
+VlnPlot(app.vasc.cleaned.integrated, features = c("Snhg11"), pt.size = 0, assay = "SCT", group.by = "integrated_snn_res.0.6")
+table(app.vasc.cleaned.integrated$integrated_snn_res.0.6, Idents(app.vasc.cleaned.integrated))
+```
+
+```{r}
+opc.markers
+opc.subcluster.markers <- FindMarkers(app.vasc.cleaned.integrated, group.by = "integrated_snn_res.0.6", ident.1 = 11, ident.2 = 9)
+opc.subcluster.markers
+```
+
+### Plot Data
+```{r}
+DimPlot(app.vasc.cleaned.integrated, label = T)
+pdf("figures/Cleaned_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "cell_type", combine = F)
+dev.off()
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "app")
+pdf("figures/APP_status_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "app")
+dev.off()
+app.vasc.cleaned.integrated$cell_type %<>% factor(levels = c("Endo", "SMC", "Peri", "OPC", "T cell", "Neuro", "Fibro", "aNSC", "Astro", "Micro", "B cell"))
+table(app.vasc.cleaned.integrated$cell_type)
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "cell_type")
+pdf("figures/Cell_type_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated, label = T, group.by = "cell_type")
+dev.off()
+```
+
+
+
+```{r}
+VlnPlot(app.vasc.cleaned.integrated, features = c("percent.endo", "percent.smc", "percent.peri", "percent.opc", "percent.neuro", "percent.pbmc", "percent.micro", "percent.astro", "percent.nsc", "percent.fibro"), combine = F, group.by = "cell_type", pt.size = 0)
+```
+
+```{r}
+genes <- c("Cldn5", "Itm2a", "Acta2", "Tagln", "Pdgfrb", "Vtn", "Cd3e", "Ccl5", "Snap25", "Syt1", "Pdgfra", "Olig1", "Trem2", "Cx3cr1", "Slc1a3", "Aqp4", "Sox11", "Tubb3", "Nov", "Efemp1", "Cd79a")
+for (gene in genes) {
+  pdf(paste0("figures/Vlns/",gene,".pdf"))
+  print(VlnPlot(app.vasc.cleaned.integrated, features = gene, group.by = "cell_type", pt.size = 0, assay = "SCT", ncol = 2))
+  dev.off()
+}
+```
+
+```{r}
+#Idents(app.vasc.cleaned.integrated) <- app.vasc.cleaned.integrated$cell_type
+#cell_type.all.markers <- FindAllMarkers(app.vasc.cleaned.integrated)
+app.vasc.cleaned.integrated$cell_type %<>% as.character()
+app.vasc.cleaned.integrated$cell_type[app.vasc.cleaned.integrated$cell_type %in% c("SMC", "Peri")] = "Mural"
+app.vasc.cleaned.integrated$cell_type[app.vasc.cleaned.integrated$cell_type %in% c("T cell", "B cell")] = "PBMC"
+app.vasc.cleaned.integrated$cell_type %<>% factor(levels = c("Endo", "Mural", "OPC", "PBMC", "Neuro", "Fibro", "aNSC", "Astro", "Micro"))
+```
+
+
+```{r}
+cell_type.all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+```
+
+```{r}
+heatmap_markers <- c("Cldn5", "Flt1", "Itm2a",
+                     "Myl9", "Acta2", "Vtn", 
+                     "Pdgfra", "Olig1", "Bcan",
+                     "Ccl5", "Cd3e",
+                     "Snap25", "Syt1",
+                     "Nov", "Ptgds",
+                     "Sox11", "Tubb5",
+                     "Aqp4", "Gja1",
+                     "C1qa", "Trem2")
+```
+
+```{r}
+Idents(app.vasc.cleaned.integrated) <- app.vasc.cleaned.integrated$cell_type
+app.vasc.cleaned.integrated.display <- SubsetData(app.vasc.cleaned.integrated, max.cells.per.ident = 3000)
+```
+
+```{r}
+pdf("figures/Cell_type_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated.display, label = T, group.by = "cell_type")
+dev.off()
+pdf("figures/APP_status_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated.display, label = T, group.by = "app")
+dev.off()
+pdf("figures/Cleaned_UMAP.pdf")
+DimPlot(app.vasc.cleaned.integrated.display, label = T, group.by = "integrated_snn_res.0.6")
+dev.off()
+```
+
+```{r}
+#app.vasc.cleaned.integrated.display %<>% ScaleData(assay = "SCT")
+pdf("figures/Cell_type_heatmap.pdf", width = 12, height = 6)
+DoHeatmap(app.vasc.cleaned.integrated.display, features = heatmap_markers, assay = "SCT", angle = 90, size = 1, disp.max = 1.5)
+dev.off()
+```
+
+```{r}
+for (gene in heatmap_markers) {
+  pdf(paste0("figures/ExpressionPlots/",gene,".pdf"))
+  print(FeaturePlot(app.vasc.cleaned.integrated.display, features = gene, order = T, min.cutoff = "q40"))
+  dev.off()
+}
+
+pdf("figures/feature_plots.pdf", width = 16, height = 12)
+FeaturePlot(app.vasc.cleaned.integrated.display, features = c("Cldn5", "Flt1", "Acta2", "Rgs5", "Olig1", "Cd3e", "Cd79a", "Snap25", "Nov", "Sox11", "Aqp4", "Trem2"), ncol = 4, order = T, min.cutoff = "q40")
+dev.off()
+```
+
+```{r}
+appEnrichPlot <- function(object, normalize.object = object, clusters = levels(object)) {
+  tmp.matrix <- t((as.matrix(table(object$sample, Idents(object))) + 1) / as.numeric(table(normalize.object$sample)))
+  batch1 <- log(tmp.matrix[,2] / tmp.matrix[,1], 2)
+  batch2 <- log(tmp.matrix[,4] / tmp.matrix[,3], 2)
+  enrich <- cbind(batch1, batch2)
+  enrich <- cbind(enrich, "mean" = apply(enrich, 1, mean))
+  enrich <- cbind(enrich, "SEM" = apply(enrich, 1, sd) / sqrt(2))
+  enrich <- cbind(enrich, "P_val" = apply(enrich, 1, function(x) t.test(x, mu = 0)$p.value))
+  enrich %<>% as.data.frame()
+  enrich %<>% rownames_to_column('cluster')
+  enrich$cluster %<>% factor(levels = levels(object))
+  print(enrich)
+  colors <- hue_pal()(length(levels(object)))
+  enrich.tidy <- gather(enrich, batch, log2_enrich, -cluster, -mean, -SEM, -P_val)
+  enrich.tidy %<>% filter(cluster %in% clusters)
+  ggplot(enrich.tidy, aes(cluster, mean / 2, fill = cluster, shape = batch)) + 
+    geom_col() +
+    geom_point(aes(y = log2_enrich), alpha = .5) + 
+    geom_errorbar(aes(x = cluster, y = mean, ymin=mean - SEM, ymax = mean + SEM), width = .1, alpha = .2) +
+    ylab("log2(enrichment)") +
+    theme_classic() +
+    scale_fill_manual(values = colors[which(levels(object) %in% clusters)])
+}
+appEnrichPlot <- function(object, normalize.object = object, clusters = levels(object)) {
+  tmp.matrix <- as.data.frame((table(object$sample, Idents(object)) + 1) / as.numeric(table(normalize.object$sample)))
+  colnames(tmp.matrix)  <- c("Sample", "Cluster", "Freq")
+  tmp.matrix$Batch <- ifelse(tmp.matrix$Sample %in% c("L2", "L4"), yes = "B1", no = "B2")
+  tmp.matrix$App <- ifelse(tmp.matrix$Sample %in% c("L2", "L5"), yes = "WT", no = "APP")
+  enrich <- tmp.matrix %>% group_by(Cluster, Batch) %>% summarize(enrich = log2(Freq[2]/Freq[1]))
+  print(enrich)
+  enrich %>% group_by(Cluster) %>% summarize(mean = mean(enrich), SEM = sd(enrich)/sqrt(n())) %>%
+    ggplot(aes(Cluster, mean, fill = Cluster)) + geom_col() +
+    geom_errorbar(aes(ymin = mean - SEM, ymax = mean + SEM), width = .1, alpha = .5) +
+    geom_point(data = enrich, mapping = aes(Cluster, enrich, shape = Batch), alpha = .5)
+}
+
+#pdf("figures/cell_type_enrichment_barplot.pdf")
+appEnrichPlot(app.vasc.cleaned.integrated)
+#dev.off()
+#pdf("figures/MAIN_FIGURE_cell_type_enrichment_barplot.pdf", c("Mural", "PBMC", "aNSC", "Micro"))
+#appEnrichPlot(app.vasc.cleaned.integrated, clusters = c("Mural", "PBMC", "aNSC", "Micro"))
+#dev.off()
+#pdf("figures/SUPPLEMENTAL_cell_type_enrichment_barplot.pdf", c("Mural", "PBMC", "aNSC", "Micro"))
+#appEnrichPlot(app.vasc.cleaned.integrated, clusters = c("Endo", "Astro", "OPC", "Fibro", "Neuro"))
+#dev.off()
+```
+
+
+
+
+```{r}
+Idents(app.vasc.cleaned.integrated) <- app.vasc.cleaned.integrated$cell_type
+Idents(app.vasc.cleaned.integrated) <- app.vasc.cleaned.integrated$integrated_snn_res.0.6
+clusterGenoEnrichPlot(app.vasc.cleaned.integrated, thresh = .1)
+```
+
+```{r}
+saveRDS(app.vasc.cleaned.integrated, file = "app.vasc.cleaned.integrated.rds")
+```
+
+```{r}
+cell_type.app.markers <- NULL
+for (celltype in levels(app.vasc.cleaned.integrated$cell_type)) {
+  cell_type.app.markers %<>% rbind(FindMarkers(app.vasc.cleaned.integrated, subset.ident = celltype, 
+                                           group.by = "app", ident.1 = "APP", assay = "SCT", logfc.threshold = 0.0) %>% 
+                                 rownames_to_column('gene') %>% mutate(cluster = celltype))
+  
+}
+```
+
+```{r}
+cell_type.app.markers %>% filter(cluster == "PBMC")
+```
+
+## SubCluster Mural Cells
+```{r murals}
+murals.cleaned <- subset(app.vasc.cleaned.integrated, idents = "Mural")
+```
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+murals.list <- SplitObject(object = murals.cleaned, split.by = "batch")
+murals.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+murals.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+murals.anchors <- FindIntegrationAnchors(murals.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+murals.cleaned.integrated <- IntegrateData(murals.anchors, dims = 1:30)
+```
+```{r runPCA murals}
+murals.cleaned.integrated %<>% ScaleData(vars.to.regress = c("percent.mito", "percent.endo"))
+murals.cleaned.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_murals}
+murals.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+murals.cleaned.integrated %<>% FindClusters(resolution = .2)
+murals.cleaned.integrated %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+murals.cleaned.integrated %<>% ReorderIdent(var = "percent.peri", afxn = "mean", reorder.numeric = T)
+VlnPlot(murals.cleaned.integrated, features= c("percent.peri", "percent.smc"), ncol = 2, pt.size = 0, assay = "SCT")
+VlnPlot(murals.cleaned.integrated, features= c("Acta2", "Tagln", "Vtn", "Rgs5"), ncol = 2, pt.size = 0, assay = "SCT")
+
+pdf("figures/mural/percent_cell_type.murals.violins.pdf")
+VlnPlot(murals.cleaned.integrated, features= c("percent.peri", "percent.smc"), ncol = 2, pt.size = 0, assay = "SCT")
+dev.off()
+pdf("figures/mural/cell_type_markers.murals.violins.pdf")
+VlnPlot(murals.cleaned.integrated, features= c("Acta2", "Tagln", "Vtn", "Rgs5"), ncol = 2, pt.size = 0, assay = "SCT")
+dev.off()
+```
+
+```{r}
+## Update cell_type labels used in general clustering
+VlnPlot(murals.cleaned.integrated, features= c("percent.peri", "percent.smc"), ncol = 2, pt.size = 0, assay = "SCT", group.by = "integrated_snn_res.0.2")
+```
+
+```{r}
+murals.cleaned.integrated %<>% BuildClusterTree(dims = 1:50)
+PlotClusterTree(murals.cleaned.integrated)
+```
+
+```{r UMAP_murals}
+DimPlot(murals.cleaned.integrated, label = T, pt.size = 0.15)
+DimPlot(murals.cleaned.integrated, pt.size = 0.15, group.by = "app")
+DimPlot(murals.cleaned.integrated, pt.size = 0.15, group.by = "integrated_snn_res.0.2")
+pdf("figures/mural/mural_UMAP.pdf")
+DimPlot(murals.cleaned.integrated, label = T, pt.size = 0.15)
+dev.off()
+pdf("figures/mural/mural_APP_status_UMAP.pdf")
+DimPlot(murals.cleaned.integrated, pt.size = 0.15, group.by = "app")
+dev.off()
+```
+
+```{r}
+FeaturePlot(murals.cleaned.integrated, features = c("Vtn"))
+```
+
+```{r}
+pdf("figures/mural/Tagln_Vtn_comined_expression.pdf", width = 12)
+FeaturePlot(murals.cleaned.integrated, features = c("Tagln", "Vtn"), blend = T, blend.threshold = 0.3)
+dev.off()
+```
+
+```{r}
+VlnPlot(murals.cleaned.integrated, features = c("percent.smc", "percent.peri"), pt.size = 0, assay = "SCT", group.by = "integrated_snn_res.0.2")
+VlnPlot(murals.cleaned.integrated, features = c("Acta2", "Tagln", "Vtn", "Rgs5"), ncol = 2, pt.size = 0, assay = "SCT", group.by = "integrated_snn_res.0.2")
+```
+
+```{r}
+murals.cleaned.integrated$cell_type[Idents(murals.cleaned.integrated) == 1] = "SMC"
+murals.cleaned.integrated$cell_type[Idents(murals.cleaned.integrated) == 2] = "Intermediate"
+murals.cleaned.integrated$cell_type[Idents(murals.cleaned.integrated) == 3] = "Peri"
+murals.cleaned.integrated$cell_type %<>% factor(levels = c("SMC", "Intermediate", "Peri"))
+DimPlot(murals.cleaned.integrated, group.by = "cell_type")
+app.vasc.cleaned.integrated$cell_type[colnames(murals.cleaned.integrated)] = "Mural"
+table(murals.cleaned.integrated$cell_type)
+```
+
+```{r clusterGenoEnrich_Murals}
+clusterGenoEnrichPlot(murals.cleaned.integrated, cluster_name = "mural", thresh = .1)
+clusterGenoEnrichPlot(murals.cleaned.integrated, cluster_name = "mural", normalize_object = app.vasc.integrated, thresh = .1)
+```
+
+```{r}
+murals.subcluster.markers <- list()
+for (i in levels(murals.cleaned.integrated)) {
+  name <- paste0('mural',i)
+  murals.subcluster.markers[[name]] <- FindMarkers(murals.cleaned.integrated, ident.1 = i) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+for (markers in murals.subcluster.markers) {
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+FeatureScatter(murals.cleaned.integrated, feature1 = "percent.peri", feature2 = "percent.smc", pt.size = 0) + geom_abline(slope = 1, intercept = 0)
+```
+
+## Find Genotype Markers
+```{r}
+mural.geno_markers <- list()
+mural.geno_markers[["combined"]] = FindMarkers(murals.cleaned.integrated, group.by = "app", ident.1 = "APP", logfc.threshold = 0.05, min.pct = .01, assay = "SCT", test.use = "poisson")
+for (i in levels(murals.cleaned.integrated)) {
+  name <- paste0("subclust_", i)
+  mural.geno_markers[[name]] <- FindMarkers(murals.cleaned.integrated, subset.ident = i, group.by = "app", ident.1 = "APP", logfc.threshold = 0.05, min.pct = .01, assay = "SCT", test.use = "poisson")
+}
+```
+
+```{r}
+tmp.combined <- data.frame()
+for (group in names(mural.geno_markers)) {
+  print(mural.geno_markers[[group]] %>% rownames_to_column('gene') %>% mutate(group = group) %>% filter(p_val_adj < 0.05))
+  tmp.combined <- rbind(tmp.combined, mural.geno_markers[[group]] %>% rownames_to_column('gene') %>% mutate(group = group) %>% filter(p_val_adj < 0.05))
+}
+write.table(x = tmp.combined, file = "figures/mural/mural.geno_markers.csv", quote = F, row.names = F, col.names = T, sep = ",")
+```
+
+```{r}
+genes <- c("Lgals1", "Ifi27", "Slc6a20a", "Ier3", "Sod3", "mt-Co1", "Gm13889", "Phlda1", "Nfkbia")
+for (gene in genes) {
+  pdf(paste0("figures/mural/geno_markers/",gene,".pdf"))
+  print(VlnPlot(murals.cleaned.integrated, group.by = "cell_type", features = gene, split.by = "app", assay = "SCT", pt.size = 0))
+  dev.off()
+}
+```
+
+
+
+
+## Look at Psuedo-Space
+We know that there exists zonation of endothelial and mural cells. Going aloing the venous-arterial axis we see a subtle transformation of the transcriptional states of mural/endothelial cells. So using a psuedotime we may be able to chart this progression from arterial smooth muscle cells to pericytes to venous smooth muscle cells.
+
+To start we find markers that differentiate pericytes from the smooth muscle cell cluster. Then we will use these genes as an ordering to to calculate psuedo-space
+### Convert Seurat Object to Monocle
+```{r}
+data <- as(as.matrix(GetAssayData(murals.cleaned.integrated, assay = "RNA")), 'sparseMatrix')
+pd <- new('AnnotatedDataFrame', data = murals.cleaned.integrated@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+
+#Construct  monocle cds
+mural.cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              lowerDetectionLimit = 0.5,
+                              expressionFamily = negbinomial.size())
+```
+
+```{r}
+## Find Markers that differentiate Pericytes from SMC
+peri.markers <- FindMarkers(murals.cleaned.integrated, group.by = "integrated_snn_res.0.2", ident.1 = 2, ident.2 = 0, logfc.threshold = .15, assay = "SCT")
+peri.markers %>% rownames_to_column('gene') %>% filter(p_val_adj < 0.05)
+all.peri.markers <- FindMarkers(murals.cleaned.integrated, group.by = "integrated_snn_res.0.2", ident.1 = 2, ident.2 = 0, logfc.threshold = 0.0, min.pct = 0.0, assay = "SCT")
+write.table(rownames(all.peri.markers[all.peri.markers$p_val_adj < 0.05, ]), file = "homer/SMC_Peri_differential.genelist.txt", quote = F, row.names = F, col.names = F, sep = "\t")
+write.table(rownames(all.peri.markers[all.peri.markers$p_val_adj > 0.05, ]), file = "homer/Mural_background.genelist.txt", quote = F, row.names = F, col.names = F, sep = "\t")
+```
+
+
+## Run Psuedotime
+```{r}
+mural.cds %<>% estimateSizeFactors()
+mural.cds %<>% estimateDispersions()
+ordering.genes <- row.names(peri.markers[peri.markers$p_val_adj < 0.01, ])
+mural.cds %<>% setOrderingFilter(ordering.genes)
+mural.cds %<>% reduceDimension(max_components = 2, method = 'DDRTree')
+mural.cds %<>% orderCells(reverse = T)
+```
+
+### Plot Psuedo-time
+```{r}
+plot_cell_trajectory(mural.cds)
+plot_cell_trajectory(mural.cds, color_by = "cell_type")
+pdf("figures/mural/Pseudotime.pdf")
+plot_cell_trajectory(mural.cds, color_by = "cell_type")
+dev.off()
+plot_cell_trajectory(mural.cds, color_by = "app")
+pdf("figures/mural/Csrp1_Rgs5_Cebpb_Errfi.pseudotime.pdf")
+plot_cell_trajectory(mural.cds, markers = c("Csrp1", "Rgs5", "Cebpb", "Errfi1"), use_color_gradient = T)
+dev.off()
+pdf("figures/mural/Tagln_Vtn_Car4_Crip1.pseudotime.pdf")
+plot_cell_trajectory(mural.cds, markers = c("Tagln", "Vtn", "Car4", "Crip1"), use_color_gradient = T)
+dev.off()
+```
+
+### View markers that change as a function of Pseudotime
+```{r}
+#diff_test_res <- differentialGeneTest(mural.cds, fullModelFormulaStr = "~sm.ns(Pseudotime)", cores = 4)
+#diff_test_res %>% arrange(qval)
+```
+
+```{r}
+genes <- c("Csrp1", "Rgs5", "Cebpb", "Errfi1", "Rasl11a", "Ptn", "Kcnj8", "Mt1", "Tagln", "Vtn", "Car4", "Crip1", "Hspa1a", "Acta2", "Tpm2", "Ifitm1", "Higd1b", "Tmsb4x", "Gatm", "Nr4a2")
+for (gene in genes) {
+  pdf(paste0("figures/mural/pseudotime_line_plots/",paste(gene),".pdf"), width = 6, height = 2)
+  print(plot_genes_in_pseudotime(mural.cds[gene,], color_by = "cell_type"))
+  dev.off()
+}
+```
+
+```{r}
+Idents(murals.cleaned.integrated) <- murals.cleaned.integrated$integrated_snn_res.0.2
+pdf("figures/mural/app_enrichment_plot.noramlized_to_mural.pdf")
+appEnrichPlot(murals.cleaned.integrated)
+dev.off()
+pdf("figures/mural/app_enrichment_plot.normalized_to_global.pdf")
+appEnrichPlot(murals.cleaned.integrated, normalize.object = app.vasc.cleaned.integrated)
+dev.off()
+clusterGenoEnrichPlot(murals.cleaned.integrated)
+clusterGenoEnrichPlot(murals.cleaned.integrated, normalize_object = app.vasc.cleaned.integrated)
+
+```
+
+## Run MEGENA on mural cells
+```{r}
+#dir.create("MEGENA/mural", recursive = T)
+genes.use <- which(apply(GetAssayData(murals.cleaned.integrated, assay = "SCT"), 1, function(x) sum(x > 0) > 20))
+murals.cleaned.integrated %<>% ScaleData(assay = "SCT")
+write.table(GetAssayData(murals.cleaned.integrated, assay = "SCT", slot = "scale.data")[genes.use, ], file = "MEGENA/mural/Mural.gene_barcode.normalized.for_MEGENA.mtx", quote = F, row.names = T, col.names = T, sep = "\t")
+```
+
+### MEGENA commands
+```{r}
+sig.mods <- read.delim("MEGENA/mural/multiscale_significant.modules.txt", header = FALSE, row.names = 1, stringsAsFactors = FALSE)
+nodes <- read.delim("MEGENA/mural/multiscale_nodeSummary.txt", row.names = 1, stringsAsFactors = FALSE)
+
+expr <- GetAssayData(murals.cleaned.integrated, assay = "SCT")
+
+cell.idents <- data.frame(APP_ = murals.cleaned.integrated$app, CellType_ = murals.cleaned.integrated$cell_type)
+cell.ident.dummies <- as.data.frame(model.matrix( ~ CellType_ - 1, data=cell.idents))
+cell.ident.dummies$CellType <- cell.idents$CellType_
+cell.ident.dummies$APP <- cell.idents$APP_
+head(cell.ident.dummies)
+```
+
+```{r}
+test.results <- NULL
+for(i in 1:nrow(sig.mods)){
+  # Get the genes in this module. Lots of blank entries, so get unique
+  cat("###### Module: ", rownames(sig.mods[i,]), "######\n")
+  print("Getting matrix...")
+  genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods[i,]))]
+  tmp <- expr[genes,]
+  weights <- nodes[genes,]$node.strength
+  top.hub <- genes[which.max(weights)]
+  signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+  
+  print("Calculating Weighted Sum...")
+  sum <- as.vector((signs*weights) %*% tmp)
+  
+  pcs.idents <- data.frame(WSUM = sum, cell.ident.dummies)
+  murals.cleaned.integrated$weighted_sum <- sum
+  
+  print("Running Module Weighted Sum Tests...")
+  tmp.summary.head <- c("Module" = rownames(sig.mods[i,]), "Top.Genes" = paste(genes[order(weights, decreasing = T)[1:5]],collapse=","))
+  
+  test.tmp <- kruskal.test(WSUM ~ CellType, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Test" = "Kruskal-Wallis", "Statistic" = as.numeric(test.tmp$statistic), "P.value" = as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ CellType_SMC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_SMC", as.numeric(test.tmp$statistic), as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ CellType_Intermediate, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_Intermediate", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ CellType_Peri, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_Peri", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ APP, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_APP", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- filter(pcs.idents, CellType == "SMC") %>% wilcox.test(WSUM ~ APP, data = .)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_SMC*APP", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- filter(pcs.idents, CellType == "Intermediate") %>% wilcox.test(WSUM ~ APP, data = .)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_Intermediate*APP", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- filter(pcs.idents, CellType == "Peri") %>% wilcox.test(WSUM ~ APP, data = .)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_Peri*APP", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+}
+
+
+colnames(test.results) <- c("module", "top_genes", "test", "statistic", "p.value")
+rownames(test.results) <- 1:nrow(test.results)
+head(test.results)
+test.results %<>% data.frame()
+test.results$p.value <- as.numeric(as.character(test.results$p.value))
+test.results$p_adj <- p.adjust(test.results$p.value)
+test.results$p_adj_bonf <- p.adjust(test.results$p.value, method = "bonferroni")
+```
+
+### View Results
+```{r}
+test.results.sig <- subset(test.results, p_adj < 1e-10)
+test.results.sig
+```
+
+```{r}
+## Module 269
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_269",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+kruskal.test(x = sum, g = murals.cleaned.integrated$cell_type)$p.value
+by(sum, murals.cleaned.integrated$cell_type, median)
+murals.cleaned.integrated$module_weighted_sum <- sum
+a <- pairwise.wilcox.test(sum, g = murals.cleaned.integrated.subset$cell_type, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/mural/MEGENA/module269/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/mural/MEGENA/module269/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/mural/MEGENA/module269/",gene,".pdf"), width = 3, height = 3)
+  print(VlnPlot(object = murals.cleaned.integrated, group.by = "cell_type", features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/mural/MEGENA/module269/module_weighted_sum.violin.pdf")
+VlnPlot(object = murals.cleaned.integrated, features = "module_weighted_sum", pt.size = 0, group.by = "cell_type") + ggtitle("Module 269") + ylab("Module Weighted Sum")
+dev.off()
+
+```
+
+
+## SubCluster Endo Cells
+```{r murals}
+endos.cleaned <- subset(app.vasc.cleaned.integrated, cell_type == "Endo")
+```
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+endos.list <- SplitObject(object = endos.cleaned, split.by = "batch")
+endos.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+endos.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+endos.anchors <- FindIntegrationAnchors(endos.list, dims = 1:30, anchor.features = 3000)
+```
+
+### Integrate!!!
+```{r}
+endos.cleaned.integrated <- IntegrateData(endos.anchors, dims = 1:30)
+```
+```{r runPCA murals}
+endos.cleaned.integrated %<>% ScaleData()
+endos.cleaned.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_murals}
+endos.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+endos.cleaned.integrated %<>% FindClusters(resolution = .6)
+endos.cleaned.integrated %<>% RunUMAP(dims = 1:30)
+```
+
+
+```{r}
+endos.cleaned.integrated %<>% BuildClusterTree(dims = 1:30, reorder.numeric = T, reorder = T)
+PlotClusterTree(endos.cleaned.integrated)
+```
+
+```{r}
+appEnrichPlot(endos.cleaned.integrated)
+```
+
+```{r}
+pdf("figures/endo/Seurat_default_clustering_UMAP.pdf")
+DimPlot(endos.cleaned.integrated, label = T)
+dev.off()
+pdf("figures/endo/APP_colored_UMAP.pdf")
+DimPlot(endos.cleaned.integrated, group.by = "app")
+dev.off()
+DimPlot(endos.cleaned.integrated, group.by = "cell_type")
+```
+
+```{r}
+endo_subtype_list <- list(
+  "1" = "miscEC",
+  "2" = "miscEC",
+  "3" = "capEC",
+  "4" = "capEC",
+  "5" = "miscEC",
+  "6" = "capEC",
+  "7" = "aEC",
+  "8" = "vEC",
+  "9" = "ifnEC"
+)
+
+endos.cleaned.integrated$subtype <- sapply(as.character(Idents(endos.cleaned.integrated)), function(x) endo_subtype_list[[x]])
+endos.cleaned.integrated$subtype %<>% factor(levels = c("aEC", "capEC", "vEC", "ifnEC", "miscEC"))
+endo_colors <- hue_pal()(5)
+table(endos.cleaned.integrated$subtype)
+```
+
+```{r}
+pdf("figures/endo/subtype_labeled_UMAP.pdf")
+DimPlot(endos.cleaned.integrated, group.by = "subtype")
+dev.off()
+```
+
+
+```{r}
+FeaturePlot(endos.cleaned.integrated, features = c("Vcam1", "Gkn3", "Mfsd2a", "Isg15"))
+```
+
+```{r}
+Idents(endos.cleaned.integrated) <- endos.cleaned.integrated$subtype
+VlnPlot(endos.cleaned.integrated, features = c("Vcam1", "Mfsd2a", "Stmn2", "Isg15"), pt.size = 0, ncol = 2, assay = "SCT")
+```
+
+```{r}
+endo.all.markers <- FindAllMarkers(endos.cleaned.integrated, logfc.threshold = .1, max.cells.per.ident = 1000)
+```
+
+```{r}
+endo.all.markers %>% filter(cluster == "miscEC") %>% arrange(desc(avg_logFC))
+```
+
+```{r}
+Idents(endos.cleaned.integrated) <- endos.cleaned.integrated$subtype
+pdf("figures/endo/Endo_subtype_enrichment.barplot.pdf")
+appEnrichPlot(endos.cleaned.integrated)
+dev.off()
+```
+
+```{r}
+endo.all.markers %>% filter(p_val_adj < 0.05) %>% select(gene) %>% unique()
+```
+
+```{r}
+endos.subcluster.markers <- list()
+for (i in levels(endos.cleaned.integrated)) {
+  name <- i
+  endos.subcluster.markers[[name]] <- FindMarkers(endos.cleaned.integrated, logfc.threshold = .1, ident.1 = i, assay = "SCT", max.cells.per.ident = 1000) %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+endo.combined.markers <- NULL
+for (markers in endos.subcluster.markers) {
+  endo.combined.markers %<>% rbind(markers)
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+endo.combined.markers %>% filter(p_val_adj < 0.01)
+endo.ordering.genes <- unique(endo.combined.markers[endo.combined.markers$p_val_adj < 0.001, ]$gene)
+length(endo.ordering.genes)
+```
+
+```{r}
+genes <- c("Gkn3", "Bmx", "Stmn2", "Vegfc", "Vcam1", "Icam1", "Nr2f2", "Vwf", "Tfrc", "Mfsd2a", "Slc38a5", "Slc16a1", "Slc1a1", "Slc25a42", "Slc38a3", "Slc25a3", "Cldn5", "Flt1", "Ifitm3", "Ifit1", "Isg15")
+genes <- endo.combined.markers %>% filter(cluster == "capEC", avg_logFC > 0, p_val_adj < 0.05) %>% .$gene
+for(gene in genes) {
+ #pdf(paste0("figures/endo/vlns/",gene,".pdf") )
+ print(VlnPlot(endos.cleaned.integrated, features = gene, pt.size = 0, ncol = 2, assay = "SCT"))
+ #dev.off()
+}
+#FindGenotypeMarkers(endos.integrated, main = "Arterial Cluster", subset.ident = 3)
+```
+
+```{r}
+VlnPlot(endos.integrated, features = c("percent.endo", "percent.smc", "percent.peri", "percent.opc", "percent.neuro", "percent.astro", "percent.rbc", "percent.fibro"), pt.size = 0, combine = F)
+VlnPlot(endos.cleaned.integrated, features = c("nCount_RNA", "nFeature_RNA", "percent.mito", "percent.ribo"), pt.size = 0, combine = F)
+```
+
+## Run MEGENA on Endothlial CElls
+
+We first must subset the endothelial cells because 80,000 is too much for MEGENA (tried running it but took over a week and the cluster killed the job).
+
+```{r}
+endos.cleaned.integrated.subset <- SubsetData(endos.cleaned.integrated, max.cells.per.ident = 1000)
+
+DimPlot(endos.cleaned.integrated.subset)
+DimPlot(endos.cleaned.integrated.subset, group.by = "subtype")
+
+dir.create("MEGENA/endo", recursive = T)
+genes.use = names(which(apply(GetAssayData(endos.cleaned.integrated.subset, assay = "SCT"), 1, function(x) sum(x > 0) > 20)))
+
+endos.cleaned.integrated.subset %<>% ScaleData(assay = "SCT")
+write.table(GetAssayData(endos.cleaned.integrated.subset, assay = "SCT", slot = "scale.data")[genes.use, ], 
+            file = "MEGENA/endo/Endo.gene-barcodes.for_MEGENA.mtx", 
+            quote = F,
+            row.names = T,
+            col.names = T,
+            sep = "\t")
+```
+
+
+```{r}
+sig.mods <- data.frame(read_tsv("MEGENA/new_endo/multiscale_significant.modules.txt", col_names = F), row.names = 1)
+nodes <- data.frame(read_tsv("MEGENA/new_endo/multiscale_nodeSummary.txt"), row.names = 1)
+
+#endos.cleaned.integrated.subset %<>% ScaleData(assay = "SCT")
+expr <- GetAssayData(endos.cleaned.integrated.subset, assay = "SCT", slot = "scale.data")
+
+cell.idents <- data.frame(APP = endos.cleaned.integrated.subset$app, Subtype_ = endos.cleaned.integrated.subset$subtype)
+levels(cell.idents$Subtype_) <- c("aEC", "capEC", "vEC", "ifnEC", "miscEC")
+cell.ident.dummies <- as.data.frame(model.matrix( ~ Subtype_ - 1, data=cell.idents))
+cell.ident.dummies$APP <- cell.idents$APP
+cell.ident.dummies$Subtype <- cell.idents$Subtype
+```
+
+```{r}
+test.results <- NULL
+for(i in 1:nrow(sig.mods)){
+  # Get the genes in this module. Lots of blank entries, so get unique
+  cat("###### Module: ", rownames(sig.mods[i,]), "######\n")
+  print("Getting matrix...")
+  genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods[i,]))]
+  tmp <- expr[genes,]
+  weights <- nodes[genes,]$node.strength
+  top.hub <- genes[which.max(weights)]
+  signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+  
+  print("Calculating Weighted Sum...")
+  sum <- as.vector((signs*weights) %*% tmp)
+  
+  pcs.idents <- data.frame(WSUM = sum, cell.ident.dummies)
+  #endos.cleaned.integrated.subset$weighted_sum <- sum
+  
+  print("Running Module Weighted Sum Tests...")
+  tmp.summary.head <- c("Module" = rownames(sig.mods[i,]), "Top.Genes" = paste(genes[order(weights, decreasing = T)[1:5]],collapse=","))
+  
+  test.tmp <- kruskal.test(WSUM ~ Subtype, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Test" = "Kruskal-Wallis", "Statistic" = as.numeric(test.tmp$statistic), "P.value" = as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ Subtype_aEC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_aEC", as.numeric(test.tmp$statistic), as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ Subtype_capEC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_capEC", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ Subtype_vEC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_vEC", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ Subtype_ifnEC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_ifnEC", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ Subtype_miscEC, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_miscEC", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+  
+  test.tmp <- wilcox.test(WSUM ~ APP, data = pcs.idents)
+  tmp.summary <- c(tmp.summary.head, "Wilcox_APP", test.tmp$statistic, as.numeric(test.tmp$p.value))
+  test.results <- rbind(test.results, tmp.summary) 
+}
+
+
+colnames(test.results) <- c("module", "top_genes", "test", "statistic", "p.value")
+rownames(test.results) <- 1:nrow(test.results)
+head(test.results)
+test.results %<>% data.frame()
+test.results$p.value <- as.numeric(as.character(test.results$p.value))
+test.results$p_adj <- p.adjust(test.results$p.value)
+test.results$p_adj_bonf <- p.adjust(test.results$p.value, method = "bonferroni")
+```
+
+```{r}
+test.results
+test.results.signif <- filter(test.results, p_adj < 1e-40)
+test.results.signif
+```
+
+```{r}
+## Module 2
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_2",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+endos.cleaned.integrated.subset$module_weighted_sum <- sum
+kruskal.test(sum, g = endos.cleaned.integrated.subset$subtype)$p.value
+data.frame(subtype = levels(endos.cleaned.integrated.subset$subtype), median = as.numeric(by(sum, endos.cleaned.integrated.subset$subtype, median)))
+by(sum, endos.cleaned.integrated.subset$subtype, sd)
+wilcox.test(module_weighted_sum ~ app, data = endos.cleaned.integrated.subset@meta.data)$p.value
+a <- pairwise.wilcox.test(sum, g = endos.cleaned.integrated.subset$subtype, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/endo/MEGENA/module2/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/endo/MEGENA/module2/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/endo/MEGENA/module2/",gene,".pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/endo/MEGENA/module2/module_weighted_sum.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0) + ggtitle("Module 2") + ylab("Module Weighted Sum")
+dev.off()
+```
+
+```{r}
+##Module 4
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_4",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+endos.cleaned.integrated.subset$module_weighted_sum <- sum
+kruskal.test(sum, g = endos.cleaned.integrated.subset$subtype)$p.value
+data.frame(subtype = levels(endos.cleaned.integrated.subset$subtype), median = as.numeric(by(sum, endos.cleaned.integrated.subset$subtype, median)))
+by(sum, endos.cleaned.integrated.subset$subtype, sd)
+wilcox.test(module_weighted_sum ~ app, data = endos.cleaned.integrated.subset@meta.data)$p.value
+a <- pairwise.wilcox.test(sum, g = endos.cleaned.integrated.subset$subtype, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/endo/MEGENA/module4/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/endo/MEGENA/module4/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/endo/MEGENA/module4/",gene,".pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/endo/MEGENA/module4/module_weighted_sum.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0) + ggtitle("Module 4") + ylab("Module Weighted Sum")
+dev.off()
+```
+
+```{r}
+## Module 7
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_7",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+endos.cleaned.integrated.subset$module_weighted_sum <- sum
+kruskal.test(sum, g = endos.cleaned.integrated.subset$subtype)$p.value
+data.frame(subtype = levels(endos.cleaned.integrated.subset$subtype), median = as.numeric(by(sum, endos.cleaned.integrated.subset$subtype, median)))
+wilcox.test(module_weighted_sum ~ app, data = endos.cleaned.integrated.subset@meta.data)$p.value
+by(sum, endos.cleaned.integrated.subset$subtype, sd)
+a <- pairwise.wilcox.test(sum, g = endos.cleaned.integrated.subset$subtype, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/endo/MEGENA/module7/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/endo/MEGENA/module7/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/endo/MEGENA/module7/",gene,".pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+  pdf(paste0("figures/endo/MEGENA/module7/",gene,".group_by.app.pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT", group.by = "app") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/endo/MEGENA/module7/module_weighted_sum.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0) + ggtitle("Module 7") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module7/module_weighted_sum.subtype.split_by_app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, split.by = "app") + ggtitle("Module 10") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module7/module_weighted_sum.subtype.app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, group.by = "app") + ggtitle("Module 10") + ylab("Module Weighted Sum")
+dev.off()
+```
+
+```{r}
+## Module 10
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_10",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+endos.cleaned.integrated.subset$module_weighted_sum <- sum
+kruskal.test(sum, g = endos.cleaned.integrated.subset$subtype)$p.value
+data.frame(subtype = levels(endos.cleaned.integrated.subset$subtype), median = as.numeric(by(sum, endos.cleaned.integrated.subset$subtype, median)))
+wilcox.test(module_weighted_sum ~ app, data = endos.cleaned.integrated.subset@meta.data)$p.value
+subtype.app.tests <- NULL
+for (i in levels(endos.cleaned.integrated.subset$subtype)) {
+  subtype.app.tests <- rbind(subtype.app.tests, c("Subtype" = i, "Wilcox p-value" = wilcox.test(module_weighted_sum ~ app, data = filter(endos.cleaned.integrated.subset@meta.data, subtype == i))$p.value * 5))
+}
+data.frame(subtype.app.tests)
+a <- pairwise.wilcox.test(sum, g = endos.cleaned.integrated.subset$subtype, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/endo/MEGENA/module10/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/endo/MEGENA/module10/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/endo/MEGENA/module10/",gene,".subtype.pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+  pdf(paste0("figures/endo/MEGENA/module10/",gene,".app.pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT", group.by = "app") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/endo/MEGENA/module10/module_weighted_sum.subtype.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0) + ggtitle("Module 10") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module10/module_weighted_sum.subtype.split_by_app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, split.by = "app") + ggtitle("Module 10") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module10/module_weighted_sum.subtype.app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, group.by = "app") + ggtitle("Module 10") + ylab("Module Weighted Sum")
+dev.off()
+```
+
+```{r}
+## Module 15
+genes <- rownames(expr)[rownames(expr) %in% unique(as.character(sig.mods["comp1_15",]))]
+tmp <- expr[genes,]
+weights <- nodes[genes,]$node.strength
+top.hub <- genes[which.max(weights)]
+signs <- sapply(genes, function(x) if(cor(tmp[top.hub,], tmp[x,]) > 0) 1 else -1)
+sum <- as.vector((signs*weights) %*% tmp)
+endos.cleaned.integrated.subset$module_weighted_sum <- sum
+kruskal.test(sum, g = endos.cleaned.integrated.subset$subtype)$p.value
+data.frame(subtype = levels(endos.cleaned.integrated.subset$subtype), median = as.numeric(by(sum, endos.cleaned.integrated.subset$subtype, median)))
+wilcox.test(module_weighted_sum ~ app, data = endos.cleaned.integrated.subset@meta.data)$p.value
+a <- pairwise.wilcox.test(sum, g = endos.cleaned.integrated.subset$subtype, p.adjust.method = "bonferroni")$p.value
+write.table(a, file = "figures/endo/MEGENA/module15/pairwise.wilcox.p-values.txt", quote = F, sep = "\t", row.names = T, col.names = T)
+pdf("figures/endo/MEGENA/module15/pairwise.wilcox.heatmap.pdf")
+pheatmap(mat = -log(a + 1e-300, 10), cluster_rows = F, cluster_cols = F,
+         color = colorRampPalette(colors = c("light yellow", "red"))(100),
+         breaks = seq(from = 0, to = 300, length.out = 101), display_numbers = signif(a, digits= 3) %>% replace(. == "0", "< 1e-300"))
+dev.off()
+for (gene in genes[order(weights, decreasing = T)[1:4]]) {
+  pdf(paste0("figures/endo/MEGENA/module15/",gene,".subtype.pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT") + theme(legend.position = "none"))
+  dev.off()
+  pdf(paste0("figures/endo/MEGENA/module15/",gene,".app.pdf"), width = 3, height = 3)
+  print(VlnPlot(object = endos.cleaned.integrated.subset, features = gene, pt.size = 0, assay = "SCT", group.by = "app") + theme(legend.position = "none"))
+  dev.off()
+}
+
+pdf("figures/endo/MEGENA/module15/module_weighted_sum.subtype.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0) + ggtitle("Module 15") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module15/module_weighted_sum.subtype.split_by_app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, split.by = "app") + ggtitle("Module 15") + ylab("Module Weighted Sum")
+dev.off()
+pdf("figures/endo/MEGENA/module15/module_weighted_sum.subtype.app.violin.pdf")
+VlnPlot(object = endos.cleaned.integrated.subset, features = "module_weighted_sum", pt.size = 0, group.by = "app") + ggtitle("Module 15") + ylab("Module Weighted Sum")
+dev.off()
+```
+
+
+```{r}
+VlnPlot(object = endos.cleaned.integrated.subset, features = c("Tmsb10", "Car4", "Icam1", "Vcam1", "Slc38a5"), pt.size = 0, assay = "SCT", slot = "scale.data", combine = F)
+```
+
+### View Results
+```{r}
+#write.table(glm.res, file = "protein_coding/significant_module_associations_with_cell_type_app_status.normalized.coding.txt", quote = FALSE, sep = "\t", row.names = FALSE)
+glm.res.sig <- subset(glm.res, p_adj < 1e-10)
+glm.res %>% filter(variable != "(Intercept)")
+#dim(glm.res.sig)
+```
+
+```{r}
+```
+
+```{r}
+genes <- unique(unlist(strsplit(x = as.character(glm.res.sig[glm.res.sig$module == "comp1_188",]$genes), split=",")))
+genes <- genes[-length(genes)]
+weights <- nodes[genes,]$node.strength
+endos.cleaned.integrated.subset$module_weight_sum <- as.numeric(weights %*% GetAssayData(endos.cleaned.integrated.subset,assay = "SCT", slot = "scale.data")[genes,])
+
+VlnPlot(endos.cleaned.integrated.subset, group.by = "subtype", features = "module_weight_sum", pt.size = 0)
+by(endos.cleaned.integrated.subset$module_weight_sum, INDICES = endos.cleaned.integrated.subset$subtype, median)
+```
+
+```{r}
+VlnPlot(endos.cleaned.integrated.subset, group.by = "subtype", features = "module_weight_sum", pt.size = 0)
+```
+
+```{r}
+sig.mods["comp1_182",]
+```
+
+```{r}
+pdf("figures/endo/Seurat_default_clustering_UMAP.pdf")
+DimPlot(endos.cleaned.integrated.subset, label = T)
+dev.off()
+pdf("figures/endo/APP_colored_UMAP.pdf")
+DimPlot(endos.cleaned.integrated.subset, group.by = "app")
+dev.off()
+pdf("figures/endo/subtype_labeled_UMAP.pdf")
+DimPlot(endos.cleaned.integrated.subset, group.by = "subtype")
+dev.off()
+table(endos.cleaned.integrated$subtype)
+```
+
+## Run Pseudospace on Endothelial Cells
+```{r}
+endos.cleaned.integrated.subset %<>% subset(subtype != "miscEC")
+data <- as(as.matrix(GetAssayData(endos.cleaned.integrated.subset, assay = "RNA")), 'sparseMatrix')
+pd <- new('AnnotatedDataFrame', data = endos.cleaned.integrated.subset@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+
+#Construct  monocle cds
+endo.cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              lowerDetectionLimit = 0.5,
+                              expressionFamily = negbinomial.size())
+```
+
+```{r}
+endos.subset.subcluster.markers <- list()
+for (i in levels(endos.cleaned.integrated.subset)) {
+  name <- i
+  endos.subset.subcluster.markers[[name]] <- FindMarkers(endos.cleaned.integrated.subset, logfc.threshold = .1, ident.1 = i, assay = "SCT") %>% 
+                                                                  rownames_to_column('gene') %>%
+                                                                  mutate(cluster = i)
+}
+```
+
+```{r}
+endo.subset.combined.markers <- NULL
+for (markers in endos.subset.subcluster.markers) {
+  endo.subset.combined.markers %<>% rbind(markers)
+  print(markers %>% filter(avg_logFC > 0))
+}
+```
+
+```{r}
+endo.subset.combined.markers %>% filter(p_val_adj < 0.01)
+endo.ordering.genes <- unique(endo.subset.combined.markers[endo.subset.combined.markers$p_val_adj < 0.01, ]$gene)
+length(endo.ordering.genes)
+```
+### Run Psuedotime
+```{r}
+endo.cds %<>% estimateSizeFactors()
+endo.cds %<>% estimateDispersions()
+endo.cds %<>% setOrderingFilter(endo.ordering.genes)
+endo.cds %<>% reduceDimension(max_components = 2, method = 'DDRTree')
+endo.cds %<>% orderCells()
+```
+
+### Plot Psuedo-time
+```{r}
+plot_cell_trajectory(endo.cds)
+plot_cell_trajectory(endo.cds, color_by = "subtype") + scale_color_manual(values = endo_colors[1:4])
+plot_cell_trajectory(endo.cds, color_by = "app")
+pdf("figures/endo/pseudotime/psuedotime_state.cell_trajectory.pdf")
+plot_cell_trajectory(endo.cds)
+dev.off()
+pdf("figures/endo/pseudotime/endo_subtype.cell_trajectory.pdf")
+plot_cell_trajectory(endo.cds, color_by = "subtype") + scale_color_manual(values = endo_colors[1:4])
+dev.off()
+pdf("figures/endo/pseudotime/endo_app.cell_trajectory.pdf")
+plot_cell_trajectory(endo.cds, color_by = "app")
+dev.off()
+plot_cell_trajectory(endo.cds, markers = c("Bmx", "Gkn3", "Stmn2", "Sema3g"), use_color_gradient = T)
+plot_cell_trajectory(endo.cds, markers = c("Nr2f2", "Mfsd2a", "Tfrc", "Vwf"), use_color_gradient = T)
+plot_cell_trajectory(endo.cds, markers = c("Slc16a1", "Gkn3", "Slc38a5", "Ivns1abp"), use_color_gradient = T)
+```
+
+### View markers that change as a function of Pseudotime
+```{r}
+diff_test_res <- differentialGeneTest(endo.cds, fullModelFormulaStr = "~sm.ns(Pseudotime)", cores = 4)
+diff_test_res %<>% arrange(qval)
+diff_test_res %>% filter(qval < 1e-5)
+```
+
+```{r}
+#pseudotime.heatmap.matrix <- endo.cds[diff_test_res[diff_test_res$qval < 1e-100, ]$gene_short_name, order(endo.cds$Pseudotime)]
+#pseudotime.heatmap.matrix %<>% as.matrix()
+#pheatmap(mat = pseudotime.heatmap.matrix, 
+#         cluster_cols = F, cluster_rows = T, 
+#         clustering_method = "ward.D2", scale = "row",
+#         treeheight_row = 0, treeheight_col = 0, cutree_rows = 6,
+#         show_colnames = F, show_rownames = F)
+
+plot_pseudotime_heatmap(cds_subset = endo.cds[diff_test_res[diff_test_res$qval < 1e-200, ]$gene_short_name,],
+                num_clusters = 1,
+                show_rownames = F)
+plot_pseudotime_heatmap(cds_subset = endo.cds[c("Bmx", "Gkn3", "Stmn2", "Mgp")])
+```
+
+```{r}
+endo.cds["Stmn2", ]
+summary(endo.cds$Pseudotime)
+order(endo.cds$Pseudotime)
+```
+
+```{r}
+genes <- c("Glul", "Itm2a", "Stmn2", "Tm4sf1", "Tmsb10", "Gkn3", "Mgp", "Mt1", "Car4", "Ctla2a", "Icam1", "Slc38a5", "Clu", "Gatm", "Timp3", "Pglyrp1", "Cyp2e1", "Vcam1", "Ccnd2", "Vegfc", "Slc7a5", "Slc16a1", "Ifit1", "Ifit3", "Isg15", "Cxcl12")
+for (gene in genes) {
+  pdf(paste0("figures/endo/pseudotime/lineplots/",gene,".pdf"), height = 2.5, width = 6)
+  print(plot_genes_in_pseudotime(endo.cds[gene, ], color_by = "subtype") + scale_color_manual(values = endo_colors[1:4]))
+  dev.off()
+}
+
+```
+
+### BEAM
+```{r}
+endo.BEAM_res.branch_1 <- BEAM(endo.cds, branch_point = 1, cores = 16)
+endo.BEAM_res.branch_2 <- BEAM(endo.cds, branch_point = 2, cores = 16)
+```
+
+```{r}
+endo.BEAM_res.branch_1 %>% arrange(qval)
+endo.BEAM_res.branch_2 %>% arrange(qval)
+```
+
+```{r}
+plot_genes_branched_pseudotime(endo.cds[c("Tmsb10", "Car4", "Ifitm3", "Ly6c1"),],
+                               branch_point = 1,
+                               color_by = "subtype",
+                               ncol = 1)
+plot_genes_branched_pseudotime(endo.cds[c("Ifit3", "Isg15", "Ly6a", "Ifit1"),],
+                               branch_point = 1,
+                               color_by = "subtype",
+                               ncol = 1)
+```
+
+
+```{r}
+app.markers <- list()
+app.markers[["global"]] = FindMarkers(endos.cleaned.integrated, ident.1 = "APP", group.by = "app", assay = "SCT", logfc.threshold = 0.1, min.pct = .1) %>% 
+                            rownames_to_column('gene') %>%
+                            mutate(test = "global") %>%
+                            filter(p_val_adj < 0.01) %>%
+                            column_to_rownames('gene')
+
+for(subtype in levels(endos.cleaned.integrated)) {
+  app.markers[[subtype]] = FindMarkers(endos.cleaned.integrated, subset.ident = subtype, group.by = "app", ident.1 = "APP", assay = "SCT", logfc.threshold = 0.1, min.pct = .1) %>% 
+                                       rownames_to_column('gene') %>%
+                                       mutate(test = subtype) %>% 
+                                       filter(p_val_adj < 0.01) %>%
+                                       column_to_rownames('gene')
+}
+```
+
+```{r}
+for (markers in app.markers) {
+  print(markers)
+}
+```
+
+```{r}
+combined_markers <- unique(Reduce(c, lapply(app.markers, rownames)))
+heatmap.mtx <- data.frame()
+for( gene in combined_markers) {
+ heatmap.mtx <- rbind(heatmap.mtx, as.numeric(sapply(app.markers, function(x) x[gene, "avg_logFC"])))
+}
+colnames(heatmap.mtx) <- names(app.markers)
+rownames(heatmap.mtx) <- combined_markers
+heatmap.mtx %<>% as.matrix()
+heatmap.mtx %<>% replace_na(0)
+
+pheatmap(mat = heatmap.mtx, 
+         color = colorRampPalette(colors = c("blue", "white smoke", "red"))(20),
+         breaks = seq(from = -.4, to = .4, length.out = 21),
+         scale = "none", treeheight_row = 0, treeheight_col = 0, clustering_method = "ward.D2",
+         cluster_cols = F, cluster_rows = T, cutree_rows = 8,
+         show_colnames = T, show_rownames = T, gaps_col = c(1),
+         cellwidth = 25, file = "test.pdf")
+```
+
+```{r}
+genes_plot <- c("Ly6c1", "Hspa8", "Hspa1a", "Vwa1", "Klf2", "Tsc22d3", "Ly6a", "Gm42418", "mt-Co1", "Apod", "Slc7a5", "Ctla2a", "Fth1", "Gm12216", "Junb", "Mt2", "Cst3", "Icam2", "Nostrin", "Plat")
+for(gene in genes_plot) {
+  print(VlnPlot(endos.cleaned.integrated, features = gene, pt.size = 0, group.by = "cell_type", split.by = "app", assay = "SCT", combine = F))
+  print(VlnPlot(endos.cleaned.integrated, features = gene, pt.size = 0, split.by = "app", assay = "SCT", combine = F))
+}
+```
+
+## SubCluster Immune Cells
+```{r murals}
+immune.cleaned <- subset(app.vasc.cleaned.integrated, cell_type %in% c("PBMC", "Micro"))
+```
+
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+immune.list <- SplitObject(object = immune.cleaned, split.by = "batch")
+immune.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+immune.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+immune.anchors <- FindIntegrationAnchors(immune.list, dims = 1:30)
+```
+
+### Integrate!!!
+```{r}
+immune.cleaned.integrated <- IntegrateData(immune.anchors, dims = 1:30)
+```
+```{r runPCA murals}
+immune.cleaned.integrated %<>% ScaleData(vars.to.regress = c("percent.mito", "percent.endo"))
+immune.cleaned.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_murals}
+immune.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+immune.cleaned.integrated %<>% FindClusters(resolution = .2)
+immune.cleaned.integrated %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+pdf("figures/immune/immune_UMAP.pdf")
+DimPlot(immune.cleaned.integrated, label = T)
+dev.off()
+DimPlot(immune.cleaned.integrated, label = T)
+DimPlot(immune.cleaned.integrated, label = T, group.by = "cell_type")
+pdf("figures/immune/immune_colored_by_APP.pdf")
+DimPlot(immune.cleaned.integrated, label = F, group.by = "app")
+dev.off()
+
+```
+
+```{r}
+pdf("figures/immune/immune_enrichment.pdf", height = 9)
+appEnrichPlot(immune.cleaned.integrated, normalize.object = app.vasc.cleaned.integrated) + theme_classic()
+dev.off()
+```
+
+```{r}
+pdf("figures/immune/immune_cell_markers.pdf", height = 12)
+VlnPlot(immune.cleaned.integrated, features = c("Cd3e", "Trem2", "Cd8a", "Cx3cr1", "Cd4", "Cd79a", "Ifng", "Ms4a1"), ncol = 2, assay = "RNA", pt.size = 0)
+dev.off()
+```
+
+```{r}
+immune.cluster_markers <- list()
+for ( i in levels(immune.cleaned.integrated)) {
+  name = paste0("immune",i)
+  immune.cluster_markers[[name]] <- FindMarkers(immune.cleaned.integrated, ident.1 = i, assay = "SCT") %>%
+                                      rownames_to_column('gene') %>%
+                                      mutate(clust = name)
+}
+```
+
+```{r}
+for (markers in immune.cluster_markers) {
+  print(markers %>% filter(avg_logFC > 0, p_val_adj < .05))
+}
+
+write.table(immune.cluster_markers[[2]], file = "figures/immune/ifng_t_cell_markers.csv", sep = ",", row.names = F, col.names = T, quote = F)
+```
+
+```{r}
+genes <- c("Ifit1", "Isg15", "Ifit3", "Irf7", "Stat1", "Phf11c", "Ifi209", "Ifi203", "Zbp1")
+for (gene in genes) {
+  pdf(paste0("figures/immune/geno_markers/", gene, ".violin.pdf"))
+  print(VlnPlot(immune.cleaned.integrated, features = gene, pt.size = 0, assay = "SCT"))
+  dev.off()
+  pdf(paste0("figures/immune/geno_markers/", gene,".violin.split_APP.pdf"))
+  print(VlnPlot(immune.cleaned.integrated, features = gene, pt.size = 0, split.by = "app", assay = "SCT"))
+  dev.off()
+}
+```
+
+```{r}
+immune_subtype_list <- list(
+  "0" = "T cell",
+  "1" = "Micro",
+  "2" = "B cell",
+  "3" = "Ifn-g+ T cell"
+)
+
+immune.cleaned.integrated$subtype <- factor(sapply(as.character(Idents(immune.cleaned.integrated)), function(x) immune_subtype_list[[x]]), levels = c("T cell", "Ifn-g+ T cell", "Micro", "B cell"))
+Idents(immune.cleaned.integrated) <- immune.cleaned.integrated$subtype
+```
+
+```{r}
+pdf("figures/immune/DAM_signature_downregulated_genes.violins.pdf")
+VlnPlot(immune.cleaned.integrated, features = c("P2ry12", "Tmem119", "Cx3cr1", "Selplg"), ncol = 2, pt.size = 0, assay = "SCT", split.by = "app", idents = "Micro")
+dev.off()
+pdf("figures/immune/DAM_signature_upregulated_genes.violins.pdf")
+VlnPlot(immune.cleaned.integrated, features = c("Ccl4", "Cst7", "Apoe", "Cd74"), ncol = 2, pt.size = 0, assay = "SCT", split.by = "app", idents = "Micro")
+dev.off()
+```
+
+```{r}
+immune.app.markers <- list()
+immune.app.markers[["T cell"]] <- FindMarkers(immune.cleaned.integrated, subset.ident = c("T cell", "Ifn-g+ T cell"), group.by = "app", ident.1 = "APP", assay = "SCT", min.pct = .1, test.use = "negbinom") 
+immune.app.markers[["Micro"]] <- FindMarkers(immune.cleaned.integrated, subset.ident = c("Micro"), group.by = "app", ident.1 = "APP", assay = "SCT", min.pct = .1, test.use = "negbinom") 
+immune.app.markers[["B cell"]] <- FindMarkers(immune.cleaned.integrated, subset.ident = c("B cell"), group.by = "app", ident.1 = "APP", assay = "SCT", min.pct = .1, test.use = "negbinom") 
+for (markers in immune.app.markers) {
+  print(markers)
+}
+```
+
+```{r}
+#immune.cleaned.integrated$cell_type[Idents(immune.cleaned.integrated) %in% c(0,1,4)] = "T Cell"
+#immune.cleaned.integrated$cell_type[Idents(immune.cleaned.integrated) == 2] = "Micro"
+#immune.cleaned.integrated$cell_type[Idents(immune.cleaned.integrated) == 3] = "B Cell"
+#DimPlot(immune.cleaned.integrated, label = T, group.by = "cell_type")
+#app.vasc.cleaned.integrated$cell_type[colnames(immune.cleaned.integrated)] = immune.cleaned.integrated$cell_type
+```
+
+
+
+```{r}
+misc.cells <- SubsetData(app.vasc.cleaned.integrated, ident.use = 9:12)
+```
+### First Normalize each batch with SCTransform
+```{r echo=T, results='hide'}
+misc.list <- SplitObject(object = misc.cells, split.by = "batch")
+misc.list[[1]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+misc.list[[2]] %<>% SCTransform(verbose = F, vars.to.regress = c("percent.mito", "percent.choroid", "percent.endo"))
+```
+
+### Then Find Integartion Anchors
+```{r}
+misc.anchors <- FindIntegrationAnchors(misc.list, dims = 1:30, anchor.features = 3000)
+```
+
+### Integrate!!!
+```{r}
+misc.cleaned.integrated <- IntegrateData(misc.anchors, dims = 1:30)
+```
+```{r runPCA murals}
+misc.cleaned.integrated %<>% ScaleData(vars.to.regress = c("percent.mito", "percent.endo"))
+misc.cleaned.integrated %<>% RunPCA()
+```
+```{r clusterAndTSNE_murals}
+misc.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+misc.cleaned.integrated %<>% FindClusters(resolution = .6)
+misc.cleaned.integrated %<>% RunUMAP(dims = 1:30)
+```
+
+```{r}
+DimPlot(misc.cleaned.integrated, label = T)
+DimPlot(misc.cleaned.integrated, label = T, group.by = "cell_type")
+DimPlot(misc.cleaned.integrated, label = T, group.by = "app")
+```
+
+```{r}
+misc.cluster_markers <- list()
+for ( i in levels(misc.cleaned.integrated)) {
+  name = paste0("misc",i)
+  misc.cluster_markers[[name]] <- FindMarkers(misc.cleaned.integrated, ident.1 = i, assay = "SCT") %>%
+                                      rownames_to_column('gene') %>%
+                                      mutate(clust = name)
+}
+```
+
+```{r}
+for (markers in misc.cluster_markers) {
+  print(markers %>% filter(avg_logFC > 0, p_val_adj < .05))
+}
+```
+
+```{r}
+VlnPlot(misc.cleaned.integrated, features = c("Olig1", "Pdgfra", "Meg3", "Gria2", "Gad1", "Sox11", "Gja1", "Nov", "Lum"), assay = "SCT", pt.size = 0)
+VlnPlot(misc.cle)
+```
+
+```{r}
+#misc.cleaned.integrated$cell_type[Idents(misc.cleaned.integrated) %in% c(0,2)] = "OPC"
+#misc.cleaned.integrated$cell_type[Idents(misc.cleaned.integrated) %in% c(1,3,5)] = "Neuro"
+#misc.cleaned.integrated$cell_type[Idents(misc.cleaned.integrated) == 4] = "Fibro"
+#misc.cleaned.integrated$cell_type[Idents(misc.cleaned.integrated) == 6] = "aNSC"
+#misc.cleaned.integrated$cell_type[Idents(misc.cleaned.integrated) == 7] = "Astro"
+#DimPlot(misc.cleaned.integrated, label = T, group.by = "cell_type")
+#app.vasc.cleaned.integrated$cell_type[colnames(misc.cleaned.integrated)] = misc.cleaned.integrated$cell_type
+```
+
+```{r}
+app.vasc.cleaned.integrated$cell_type %<>% as.character()
+app.vasc.cleaned.integrated$cell_type[app.vasc.cleaned$cell_type %in% c("SMC", "Peri")] <- "Mural"
+app.vasc.cleaned.integrated$cell_type[app.vasc.cleaned$cell_type %in% c("T Cell", "B cell")] <- "PBMC"
+app.vasc.cleaned.integrated$cell_type %<>% factor(levels = c("Endo", "Mural", "OPC", "PBMC", "Neuro", "Fibro", "aNSC", "Astro", "Micro"))
+table(app.vasc.cleaned.integrated$cell_type)
+cell_type_counts <- paste0(levels(app.vasc.cleaned.integrated$cell_type), "  (", table(app.vasc.cleaned.integrated$cell_type), ")")
+app.vasc.cleaned.integrated$cell_type_counts <- factor(sapply(as.integer(app.vasc.cleaned.integrated$cell_type), function(x) cell_type_counts[x]), levels = cell_type_counts)
+table(app.vasc.cleaned.integrated$cell_type_counts)
+DimPlot(app.vasc.cleaned.integrated, group.by = "cell_type_counts")
+```
+
+```{r}
+features_to_integrate <- unique(c(VariableFeatures(endos.cleaned.integrated)[1:1000], 
+                                  VariableFeatures(murals.cleaned.integrated)[1:1000], 
+                                  VariableFeatures(immune.cleaned.integrated)[1:1000], 
+                                  VariableFeatures(misc.cleaned.integrated)[1:1000]))
+```
+```{r}
+length(features_to_integrate)
+```
+
+
+### Find Integartion Anchors
+```{r}
+app.vasc.anchors <- FindIntegrationAnchors(app.vasc.list, dims = 1:30, anchor.features = features_to_integrate)
+```
+
+### Integrate!!!
+```{r}
+app.vasc.cleaned.integrated <- IntegrateData(app.vasc.anchors, dims = 1:30)
+```
+
+```{r}
+app.vasc.cleaned.integrated %<>% ScaleData()
+app.vasc.cleaned.integrated %<>% RunPCA()
+```
+
+### Cluster newly cleaned data
+```{r findClusters}
+app.vasc.cleaned.integrated %<>% FindNeighbors(dims.use = 1:30)
+app.vasc.cleaned.integrated %<>% FindClusters(resolution = .6)
+```
+
+#### UMAP plots
+```{r TSNE}
+app.vasc.cleaned.integrated %<>% RunUMAP(dims = 1:30, min_dist = 0.75)
+```
+
+```{r}
+app.vasc.cleaned.integrated %<>% BuildClusterTree(dims = 1:50)
+PlotClusterTree(app.vasc.cleaned.integrated)
+```
+```{r}
+
+DimPlot(app.vasc.cleaned.integrated, label = T)
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "cell_type")
+DimPlot(app.vasc.cleaned.integrated, label = F, group.by = "cell_type")
+DimPlot(app.vasc.cleaned.integrated, label = T, group.by = "app")
+```
+
+```{r}
+VlnPlot(endos.cleaned.integrated.subset, features = c("Il1r1", "Cdh13", "Slc16a1", "Mfsd2a"), pt.size = 0, assay = "SCT", combine = F)
+```
+
+```{r}
+global.app.markers <- NULL
+for (i in levels(app.vasc.cleaned.integrated)) {
+  global.app.markers <- rbind(global.app.markers, FindMarkers(app.vasc.cleaned.integrated, subset.ident = i, group.by = "app", ident.1 = "APP", assay = "SCT", logfc.threshold = 0, min.pct = 0)  %>% rownames_to_column('gene') %>% mutate(cluster = i))
+}
+global.app.markers$cluster %<>% factor(levels = levels(app.vasc.cleaned.integrated))
+```
+
+```{r}
+cols = hue_pal()(9)
+pdf(file = "figures/diff_exp.scatter_plot.no_testing_correction.pdf")
+global.app.markers %>% 
+  ggplot(aes(cluster, avg_logFC, color = ifelse(p_val < 0.05, cluster, "none"))) + 
+  geom_jitter(alpha = .5) + 
+  scale_color_manual(values = c(cols, "grey")) +
+  theme(legend.position = "none") +
+  ylab("Average logFC") +
+  xlab("")
+dev.off()
+cols = c(cols[1:5], "grey", cols[6:9])
+pdf(file = "figures/diff_exp.scatter_plot.adjusted_p_value.pdf")
+global.app.markers %>% 
+  ggplot(aes(cluster, avg_logFC, color = ifelse(p_val_adj < 0.05, cluster, "none"))) + 
+  geom_jitter(alpha = .5) + 
+  scale_color_manual(values = cols) +
+  theme(legend.position = "none") +
+  ylab("Average logFC") +
+  xlab("")
+dev.off()
+```
+
+```{r}
+global.app.markers %>% filter(p_val_adj < 0.05) %>% group_by(gene) %>% summarize(count = n(), clusters = paste(cluster, collapse = ','), FCs = paste(avg_logFC, collapse = ',')) %>% arrange(desc(count))
+```
+
+```{r}
+genes <- global.app.markers %>% filter(p_val_adj < 0.05) %>% group_by(gene) %>% summarize(count = n(), clusters = paste(cluster, collapse = ','), FCs = paste(avg_logFC, collapse = ',')) %>% filter(count > 1)  %>% .$gene
+VlnPlot(app.vasc.cleaned.integrated, features = genes, pt.size = 0, assay = "SCT", split.by = "app", combine = F)
+```
+
+
+```{r}
+VlnPlot(app.vasc.cleaned.integrated, features = c("Tubb2b", "Sox4", "Tubb3", "Stmn2", "Rtn1", "Hmgb2", "Hmgn2", "H2afz"), pt.size = 0, assay = "SCT", combine = F)
+```
+
